@@ -11,13 +11,16 @@
  *   Contact.qualified  -> PAYMENTS.syncCustomer()
  *   Deal.closed        -> PAYMENTS.createSubscription()
  *   Issue.created      -> REPO.createIssue()
- *   *.* (any)          -> EVENTS.forward()
  *
  * Hook configuration is per-tenant, stored in SQLite:
  *   integration_hooks(id, entity_type, verb, service, method, config, active, created_at)
  *
  * Built-in hooks (always-on, no configuration needed):
- *   - All events are forwarded to the EVENTS service for CDC
+ *   - CRM -> Payments sync (Contact.qualify, Contact.create, Deal.close)
+ *   - Projects -> GitHub sync (Issue.create, Issue.update, Issue.close)
+ *
+ * Note: CDC event forwarding to events.do is handled by @dotdo/events EventEmitter
+ * in ObjectsDO, not via integration hooks.
  */
 
 import type { ServiceBinding } from '../types'
@@ -31,7 +34,7 @@ export interface IntegrationHook {
   id: string
   entityType: string
   verb: string
-  /** Which service binding to dispatch to: PAYMENTS | REPO | INTEGRATIONS | OAUTH | EVENTS */
+  /** Which service binding to dispatch to: PAYMENTS | REPO | INTEGRATIONS | OAUTH */
   service: string
   /** HTTP method + path for the service binding RPC call */
   method: string
@@ -78,7 +81,7 @@ export interface DispatchPayload {
 }
 
 /** Available service binding names */
-export type ServiceName = 'PAYMENTS' | 'REPO' | 'INTEGRATIONS' | 'OAUTH' | 'EVENTS'
+export type ServiceName = 'PAYMENTS' | 'REPO' | 'INTEGRATIONS' | 'OAUTH'
 
 /** Map of available service bindings */
 export type ServiceBindings = Partial<Record<ServiceName, ServiceBinding>>
@@ -100,8 +103,9 @@ export const BUILTIN_HOOKS: ReadonlyArray<{
   service: ServiceName
   method: string
 }> = [
-  // All events are forwarded to the EVENTS service for CDC / event sourcing
-  { entityType: '*', verb: '*', service: 'EVENTS', method: 'POST /events/ingest' },
+  // NOTE: CDC event forwarding to events.do is now handled by @dotdo/events EventEmitter
+  // in ObjectsDO (batched, with circuit breaker and retry). The EVENTS catch-all hook
+  // has been removed from here.
 
   // CRM -> Payments integration
   { entityType: 'Contact', verb: 'qualify', service: 'PAYMENTS', method: 'POST /customers/sync' },

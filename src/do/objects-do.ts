@@ -30,6 +30,7 @@ import {
   type ServiceName,
 } from '../lib/integration-dispatch'
 import { createRels } from '../../../do/core/src/rels'
+import { EventEmitter } from '../../../events/core/src/emitter'
 import type { StoredNounSchema, NounInstance, VerbEvent, VerbConjugation, Hook } from '../types'
 
 // ---------------------------------------------------------------------------
@@ -135,10 +136,20 @@ export class ObjectsDO extends DurableObject<Cloudflare.Env> {
   /** In-memory cache of noun schemas (hydrated from SQLite on first access) */
   private nounCache: Map<string, StoredNounSchema> | null = null
 
+  /** Batched CDC event emitter — forwards events to events.do with retry and circuit breaker */
+  private emitter: EventEmitter
+
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env)
     this.sql = ctx.storage.sql
     this.rels = createRels(this.sql)
+    this.emitter = new EventEmitter(ctx, env as Record<string, unknown>, {
+      endpoint: 'https://events.workers.do/ingest',
+      batchSize: 100,
+      flushIntervalMs: 1000,
+      cdc: true,
+      trackPrevious: true,
+    })
     this.initSchema()
   }
 
@@ -1314,6 +1325,14 @@ export class ObjectsDO extends DurableObject<Cloudflare.Env> {
   }
 
   // =========================================================================
+  // DO lifecycle — alarm handler for EventEmitter retries
+  // =========================================================================
+
+  async alarm(): Promise<void> {
+    await this.emitter.handleAlarm()
+  }
+
+  // =========================================================================
   // Private helpers
   // =========================================================================
 
@@ -1382,6 +1401,15 @@ export class ObjectsDO extends DurableObject<Cloudflare.Env> {
       now,
     )
 
+    // Emit CDC change to events.do via batched EventEmitter (replaces the built-in EVENTS hook)
+    this.emitter.emitChange(
+      verb === 'create' ? 'insert' : verb === 'delete' ? 'delete' : 'update',
+      entityType,
+      entityId,
+      afterState ?? undefined,
+      beforeState ?? undefined,
+    )
+
     this.dispatchToSubscriptions(event)
     this.dispatchIntegrations(event, contextUrl ?? `https://headless.ly/~default`)
 
@@ -1395,7 +1423,7 @@ export class ObjectsDO extends DurableObject<Cloudflare.Env> {
   private getServiceBindings(): ServiceBindings {
     const bindings: ServiceBindings = {}
     const env = this.env as Record<string, unknown>
-    const serviceNames: ServiceName[] = ['PAYMENTS', 'REPO', 'INTEGRATIONS', 'OAUTH', 'EVENTS']
+    const serviceNames: ServiceName[] = ['PAYMENTS', 'REPO', 'INTEGRATIONS', 'OAUTH']
     for (const name of serviceNames) {
       if (env[name] && typeof (env[name] as { fetch?: unknown }).fetch === 'function') {
         bindings[name] = env[name] as { fetch(request: Request): Promise<Response> }

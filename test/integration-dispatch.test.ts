@@ -107,10 +107,9 @@ describe('parseMethod', () => {
 // ---------------------------------------------------------------------------
 
 describe('BUILTIN_HOOKS', () => {
-  it('should have the catch-all EVENTS hook', () => {
+  it('should NOT have the catch-all EVENTS hook (now handled by EventEmitter)', () => {
     const eventsHook = BUILTIN_HOOKS.find((h) => h.service === 'EVENTS' && h.entityType === '*' && h.verb === '*')
-    expect(eventsHook).toBeDefined()
-    expect(eventsHook!.method).toBe('POST /events/ingest')
+    expect(eventsHook).toBeUndefined()
   })
 
   it('should have Contact.qualify -> PAYMENTS hook', () => {
@@ -180,11 +179,10 @@ describe('findMatchingHooks', () => {
     },
   ]
 
-  it('should return built-in EVENTS hook for any entity and verb', () => {
+  it('should NOT return EVENTS hook (now handled by EventEmitter)', () => {
     const hooks = findMatchingHooks('Whatever', 'whatever', [])
     const eventsHook = hooks.find((h) => h.service === 'EVENTS')
-    expect(eventsHook).toBeDefined()
-    expect(eventsHook!.builtin).toBe(true)
+    expect(eventsHook).toBeUndefined()
   })
 
   it('should return built-in PAYMENTS hook for Contact.qualify', () => {
@@ -198,9 +196,9 @@ describe('findMatchingHooks', () => {
   it('should return both built-in and tenant hooks for Contact.create', () => {
     const hooks = findMatchingHooks('Contact', 'create', tenantHooks)
 
-    // Built-in: EVENTS (catch-all) + PAYMENTS (Contact.create)
+    // Built-in: PAYMENTS (Contact.create) — EVENTS catch-all removed (now via EventEmitter)
     const builtinHooks = hooks.filter((h) => h.builtin)
-    expect(builtinHooks.length).toBeGreaterThanOrEqual(2)
+    expect(builtinHooks.length).toBeGreaterThanOrEqual(1)
 
     // Tenant: ihook_custom2
     const tenantMatches = hooks.filter((h) => !h.builtin)
@@ -351,8 +349,8 @@ describe('dispatchIntegrationHooks', () => {
 
   it('should report errors for hooks when no matching service bindings exist', async () => {
     const results = await dispatchIntegrationHooks({}, payload, [])
-    // Built-in hooks still match (EVENTS catch-all, PAYMENTS for Contact.create)
-    // but since no services are bound, they all report "not available" errors
+    // Built-in hooks still match (PAYMENTS for Contact.create)
+    // but since no services are bound, they report "not available" errors
     expect(results.length).toBeGreaterThan(0)
     for (const result of results) {
       expect(result.status).toBe('error')
@@ -360,29 +358,12 @@ describe('dispatchIntegrationHooks', () => {
     }
   })
 
-  it('should dispatch to EVENTS service for any event (catch-all)', async () => {
-    const eventsService = {
-      fetch: vi.fn().mockResolvedValue(new Response('OK', { status: 200 })),
-    }
-
-    const services: ServiceBindings = { EVENTS: eventsService }
-    const results = await dispatchIntegrationHooks(services, payload, [])
-
-    // Should have at least the EVENTS catch-all hook
-    const eventsResult = results.find((r) => r.service === 'EVENTS')
-    expect(eventsResult).toBeDefined()
-    expect(eventsResult!.status).toBe('success')
-  })
-
   it('should dispatch to PAYMENTS for Contact.create (built-in)', async () => {
     const paymentsService = {
       fetch: vi.fn().mockResolvedValue(new Response('OK', { status: 200 })),
     }
-    const eventsService = {
-      fetch: vi.fn().mockResolvedValue(new Response('OK', { status: 200 })),
-    }
 
-    const services: ServiceBindings = { PAYMENTS: paymentsService, EVENTS: eventsService }
+    const services: ServiceBindings = { PAYMENTS: paymentsService }
     const results = await dispatchIntegrationHooks(services, payload, [])
 
     const paymentsResult = results.find((r) => r.service === 'PAYMENTS')
@@ -394,11 +375,8 @@ describe('dispatchIntegrationHooks', () => {
     const integrationsService = {
       fetch: vi.fn().mockResolvedValue(new Response('OK', { status: 200 })),
     }
-    const eventsService = {
-      fetch: vi.fn().mockResolvedValue(new Response('OK', { status: 200 })),
-    }
 
-    const services: ServiceBindings = { INTEGRATIONS: integrationsService, EVENTS: eventsService }
+    const services: ServiceBindings = { INTEGRATIONS: integrationsService }
 
     const tenantHooks: IntegrationHook[] = [
       {
@@ -422,12 +400,8 @@ describe('dispatchIntegrationHooks', () => {
   })
 
   it('should record error when service binding is not available', async () => {
-    // Only EVENTS is available, but Contact.create also needs PAYMENTS
-    const eventsService = {
-      fetch: vi.fn().mockResolvedValue(new Response('OK', { status: 200 })),
-    }
-
-    const services: ServiceBindings = { EVENTS: eventsService }
+    // No services bound, but Contact.create needs PAYMENTS
+    const services: ServiceBindings = {}
     const results = await dispatchIntegrationHooks(services, payload, [])
 
     // PAYMENTS should have an error result because the binding is not available
@@ -441,9 +415,6 @@ describe('dispatchIntegrationHooks', () => {
     const repoService = {
       fetch: vi.fn().mockResolvedValue(new Response('OK', { status: 200 })),
     }
-    const eventsService = {
-      fetch: vi.fn().mockResolvedValue(new Response('OK', { status: 200 })),
-    }
 
     const issuePayload: DispatchPayload = {
       ...payload,
@@ -452,7 +423,7 @@ describe('dispatchIntegrationHooks', () => {
       entityId: 'issue_123',
     }
 
-    const services: ServiceBindings = { REPO: repoService, EVENTS: eventsService }
+    const services: ServiceBindings = { REPO: repoService }
     const results = await dispatchIntegrationHooks(services, issuePayload, [])
 
     const repoResult = results.find((r) => r.service === 'REPO')
@@ -465,16 +436,9 @@ describe('dispatchIntegrationHooks', () => {
     const paymentsService = {
       fetch: vi.fn().mockRejectedValue(new Error('Payment service down')),
     }
-    const eventsService = {
-      fetch: vi.fn().mockResolvedValue(new Response('OK', { status: 200 })),
-    }
 
-    const services: ServiceBindings = { PAYMENTS: paymentsService, EVENTS: eventsService }
+    const services: ServiceBindings = { PAYMENTS: paymentsService }
     const results = await dispatchIntegrationHooks(services, payload, [])
-
-    // Events should succeed
-    const eventsResult = results.find((r) => r.service === 'EVENTS')
-    expect(eventsResult!.status).toBe('success')
 
     // Payments should fail but not throw
     const paymentsResult = results.find((r) => r.service === 'PAYMENTS')
@@ -484,9 +448,6 @@ describe('dispatchIntegrationHooks', () => {
 
   it('should dispatch Deal.close to PAYMENTS with createSubscription', async () => {
     const paymentsService = {
-      fetch: vi.fn().mockResolvedValue(new Response('OK', { status: 200 })),
-    }
-    const eventsService = {
       fetch: vi.fn().mockResolvedValue(new Response('OK', { status: 200 })),
     }
 
@@ -503,7 +464,7 @@ describe('dispatchIntegrationHooks', () => {
       timestamp: '2025-01-15T10:30:00.000Z',
     }
 
-    const services: ServiceBindings = { PAYMENTS: paymentsService, EVENTS: eventsService }
+    const services: ServiceBindings = { PAYMENTS: paymentsService }
     const results = await dispatchIntegrationHooks(services, dealPayload, [])
 
     const paymentsResult = results.find((r) => r.service === 'PAYMENTS')
@@ -513,12 +474,6 @@ describe('dispatchIntegrationHooks', () => {
   })
 
   it('should not dispatch to non-matching hooks', async () => {
-    const eventsService = {
-      fetch: vi.fn().mockResolvedValue(new Response('OK', { status: 200 })),
-    }
-
-    const services: ServiceBindings = { EVENTS: eventsService }
-
     const projectPayload: DispatchPayload = {
       ...payload,
       event: 'Project.archive',
@@ -527,10 +482,9 @@ describe('dispatchIntegrationHooks', () => {
       verb: 'archive',
     }
 
-    const results = await dispatchIntegrationHooks(services, projectPayload, [])
+    const results = await dispatchIntegrationHooks({}, projectPayload, [])
 
-    // Only EVENTS catch-all should match, not PAYMENTS or REPO
-    const nonEventsResults = results.filter((r) => r.service !== 'EVENTS')
-    expect(nonEventsResults.length).toBe(0)
+    // No hooks should match — EVENTS catch-all is gone, no PAYMENTS/REPO match for Project.archive
+    expect(results.length).toBe(0)
   })
 })
