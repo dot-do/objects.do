@@ -5,20 +5,11 @@
  * GET  /events/stream       — SSE stream (CDC) for real-time event consumption
  * GET  /events/history/:type/:id — full event history for an entity
  * GET  /events/:id          — get a single event by ID
- *
- * POST /subscriptions       — register a webhook/websocket subscription
- * GET  /subscriptions       — list all subscriptions
- * DELETE /subscriptions/:id — remove a subscription
- *
- * Time travel via entity routes:
- * GET  /entities/:type/:id?asOf=<timestamp>  — reconstruct state at timestamp
- * GET  /entities/:type/:id?atVersion=<n>     — reconstruct state at version
- * GET  /entities/:type/:id/history           — full event history
- * GET  /entities/:type/:id/diff?from=1&to=3  — diff between versions
  */
 
 import { Hono } from 'hono'
-import type { AppEnv, ApiResponse } from '../types'
+import type { AppEnv } from '../types'
+import { getStub } from '../lib/tenant'
 
 const app = new Hono<AppEnv>()
 
@@ -26,15 +17,17 @@ const app = new Hono<AppEnv>()
  * GET /events — query events
  */
 app.get('/', async (c) => {
-  const tenant = c.get('tenant')
-  const doId = c.env.OBJECTS.idFromName(tenant)
-  const stub = c.env.OBJECTS.get(doId)
-
+  const stub = getStub(c)
   const url = new URL(c.req.url)
-  const qs = url.search
 
-  const res = await stub.fetch(new Request(`https://do/events${qs}`))
-  const result = (await res.json()) as ApiResponse
+  const result = await stub.queryEvents({
+    since: url.searchParams.get('since') ?? undefined,
+    type: url.searchParams.get('type') ?? undefined,
+    entityId: url.searchParams.get('entityId') ?? undefined,
+    verb: url.searchParams.get('verb') ?? undefined,
+    limit: url.searchParams.get('limit') ? parseInt(url.searchParams.get('limit')!, 10) : undefined,
+  })
+
   return c.json(result)
 })
 
@@ -47,14 +40,14 @@ app.get('/', async (c) => {
  *   verbs  — comma-separated verbs
  */
 app.get('/stream', async (c) => {
-  const tenant = c.get('tenant')
-  const doId = c.env.OBJECTS.idFromName(tenant)
-  const stub = c.env.OBJECTS.get(doId)
-
+  const stub = getStub(c)
   const url = new URL(c.req.url)
-  const qs = url.search
 
-  const res = await stub.fetch(new Request(`https://do/events/stream${qs}`))
+  const res = await stub.getEventStream({
+    since: url.searchParams.get('since') ?? undefined,
+    types: url.searchParams.get('types') ?? undefined,
+    verbs: url.searchParams.get('verbs') ?? undefined,
+  })
 
   // Forward the SSE response directly
   return new Response(res.body, {
@@ -72,15 +65,11 @@ app.get('/stream', async (c) => {
  * GET /events/history/:type/:id — entity event history
  */
 app.get('/history/:type/:id', async (c) => {
-  const tenant = c.get('tenant')
-  const doId = c.env.OBJECTS.idFromName(tenant)
-  const stub = c.env.OBJECTS.get(doId)
-
+  const stub = getStub(c)
   const entityType = c.req.param('type')
   const entityId = c.req.param('id')
 
-  const res = await stub.fetch(new Request(`https://do/events/history/${entityType}/${entityId}`))
-  const result = (await res.json()) as ApiResponse
+  const result = await stub.entityHistory(entityType, entityId)
   return c.json(result)
 })
 
@@ -88,15 +77,11 @@ app.get('/history/:type/:id', async (c) => {
  * GET /events/:id — get single event
  */
 app.get('/:id', async (c) => {
-  const tenant = c.get('tenant')
-  const doId = c.env.OBJECTS.idFromName(tenant)
-  const stub = c.env.OBJECTS.get(doId)
-
+  const stub = getStub(c)
   const eventId = c.req.param('id')
 
-  const res = await stub.fetch(new Request(`https://do/events/${eventId}`))
-  const result = (await res.json()) as ApiResponse
-  return c.json(result)
+  const result = await stub.getEvent(eventId)
+  return c.json({ success: result.success, data: result.data, error: result.error }, result.status as 200 | 404)
 })
 
 export default app

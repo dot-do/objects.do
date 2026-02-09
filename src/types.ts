@@ -178,3 +178,67 @@ export interface NounDefinitionPayload {
   name: string
   definition: Record<string, string | null>
 }
+
+// ---------------------------------------------------------------------------
+// RPC Stub interface — typed methods on ObjectsDO called via Workers RPC
+// ---------------------------------------------------------------------------
+
+import type { FullEvent } from './do/objects-do'
+
+/**
+ * Typed stub interface for ObjectsDO RPC calls.
+ *
+ * Route handlers obtain a stub via `getStub()` and call methods directly
+ * instead of constructing HTTP requests.
+ */
+export interface ObjectsStub {
+  // Nouns
+  defineNoun(body: { name: string; definition: Record<string, string | null> }): Promise<{ success: boolean; data?: StoredNounSchema; error?: string; status: number }>
+  listNouns(): Promise<{ success: boolean; data: StoredNounSchema[] }>
+  getNounSchema(name: string): Promise<{ success: boolean; data?: StoredNounSchema; error?: string; status: number }>
+
+  // Verbs
+  listVerbs(): Promise<{ success: boolean; data: Record<string, { conjugation: VerbConjugation; nouns: string[] }> }>
+  getVerb(verb: string): Promise<{ success: boolean; data?: { noun: string; conjugation: VerbConjugation }[]; error?: string; status: number }>
+  conjugate(body: { verb: string }): Promise<{ success: boolean; data?: Record<string, string>; error?: string; status: number }>
+
+  // Entities
+  createEntity(type: string, data: Record<string, unknown>, opts?: { tenantId?: string; contextUrl?: string }): Promise<{ success: boolean; data?: NounInstance; error?: string; meta?: { eventId: string }; status: number }>
+  getEntity(type: string, id: string): Promise<{ success: boolean; data?: NounInstance; error?: string; etag?: string; status: number }>
+  listEntities(type: string, params: { limit?: number; offset?: number; filter?: string; sort?: string }): Promise<{ success: boolean; data?: NounInstance[]; error?: string; meta?: { total: number; limit: number; offset: number; hasMore: boolean }; status: number }>
+  updateEntity(type: string, id: string, updates: Record<string, unknown>, opts?: { ifMatch?: string }): Promise<{ success: boolean; data?: NounInstance; error?: string; meta?: { eventId?: string; currentVersion?: number; expectedVersion?: number }; etag?: string; status: number }>
+  deleteEntity(type: string, id: string): Promise<{ success: boolean; error?: string; meta?: { eventId: string }; status: number }>
+  executeVerb(type: string, id: string, verb: string, verbData?: Record<string, unknown>): Promise<{ success: boolean; data?: NounInstance; error?: string; meta?: { event: FullEvent }; status: number }>
+  registerHook(type: string, body: { verb: string; phase: 'before' | 'after'; code: string }): Promise<{ success: boolean; data?: { noun: string; verb: string; phase: string }; error?: string; status: number }>
+
+  // Time Travel
+  timeTravelGet(type: string, id: string, params: { asOf?: string; atVersion?: string }): Promise<{ success: boolean; data?: Record<string, unknown>; error?: string; status: number }>
+  entityDiff(type: string, id: string, params: { from?: string; to?: string }): Promise<{ success: boolean; data?: Record<string, unknown>; error?: string; status: number }>
+  entityHistory(entityType: string, entityId: string): Promise<{ success: boolean; data: FullEvent[] }>
+
+  // Events
+  queryEvents(params: { since?: string; type?: string; entityId?: string; verb?: string; limit?: number }): Promise<{ success: boolean; data: FullEvent[] }>
+  getEvent(eventId: string): Promise<{ success: boolean; data?: FullEvent; error?: string; status: number }>
+  getEventStream(params: { since?: string; types?: string; verbs?: string }): Promise<Response>
+
+  // Subscriptions
+  createSubscription(body: { pattern: string; mode: 'webhook' | 'websocket'; endpoint: string; secret?: string }): Promise<{ success: boolean; data?: Record<string, unknown>; error?: string; status: number }>
+  listSubscriptions(): Promise<{ success: boolean; data: Record<string, unknown>[] }>
+  deleteSubscription(subId: string): Promise<{ success: boolean; error?: string; status: number }>
+
+  // Integration Hooks
+  createIntegrationHook(body: { entityType: string; verb: string; service: string; method: string; config?: Record<string, unknown> }): Promise<{ success: boolean; data?: Record<string, unknown>; error?: string; status: number }>
+  listIntegrationHooks(): Promise<{ success: boolean; data: { builtin: Record<string, unknown>[]; tenant: Record<string, unknown>[] } }>
+  deleteIntegrationHook(hookId: string): Promise<{ success: boolean; error?: string; status: number }>
+  queryDispatchLog(params: { eventId?: string; service?: string; status?: string; limit?: number }): Promise<{ success: boolean; data: Record<string, unknown>[] }>
+
+  // Schema
+  fullSchema(): Promise<{ success: boolean; data: Record<string, unknown> }>
+  schemaGraph(): Promise<{ success: boolean; data: { nodes: Record<string, unknown>[]; edges: Record<string, unknown>[] } }>
+
+  // Tenants
+  provisionTenant(body: { tenantId: string; name?: string; plan?: string }): Promise<{ success: boolean; data?: Record<string, unknown>; error?: string; status: number }>
+  tenantInfo(tenantId?: string): Promise<{ success: boolean; data?: Record<string, unknown>; error?: string; status: number }>
+  tenantStats(tenantId?: string): Promise<{ success: boolean; data: Record<string, unknown> }>
+  deactivateTenant(tenantId?: string): Promise<{ success: boolean; data?: Record<string, unknown>; error?: string; status: number }>
+}

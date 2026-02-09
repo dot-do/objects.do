@@ -17,7 +17,8 @@
  */
 
 import { createMiddleware } from 'hono/factory'
-import type { AppEnv, TenantContext } from '../types'
+import type { AppEnv, TenantContext, ObjectsStub } from '../types'
+import { getTenantStub } from './do-router'
 
 // ---------------------------------------------------------------------------
 // Known subdomain sets
@@ -242,11 +243,10 @@ export const tenantMiddleware = () =>
   })
 
 /**
- * Get the DO stub for the current tenant.
+ * Get the typed DO stub for the current tenant.
  * Convenience helper used by route handlers.
  */
-export function getStub(c: { env: AppEnv['Bindings']; get: (key: 'tenant') => string }) {
+export function getStub(c: { env: AppEnv['Bindings']; get: (key: 'tenant') => string }): ObjectsStub {
   const tenant = c.get('tenant')
-  const doId = c.env.OBJECTS.idFromName(tenant)
-  return c.env.OBJECTS.get(doId)
+  return getTenantStub(c.env, tenant)
 }

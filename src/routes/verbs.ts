@@ -7,7 +7,8 @@
  */
 
 import { Hono } from 'hono'
-import type { AppEnv, ApiResponse } from '../types'
+import type { AppEnv } from '../types'
+import { getStub } from '../lib/tenant'
 
 const app = new Hono<AppEnv>()
 
@@ -17,12 +18,8 @@ const app = new Hono<AppEnv>()
  * Returns: { create: { conjugation: {...}, nouns: ['Contact', 'Deal'] }, ... }
  */
 app.get('/', async (c) => {
-  const tenant = c.get('tenant')
-  const doId = c.env.OBJECTS.idFromName(tenant)
-  const stub = c.env.OBJECTS.get(doId)
-
-  const res = await stub.fetch(new Request('https://do/verbs'))
-  const result = (await res.json()) as ApiResponse
+  const stub = getStub(c)
+  const result = await stub.listVerbs()
   return c.json(result)
 })
 
@@ -36,20 +33,10 @@ app.get('/', async (c) => {
  */
 app.post('/conjugate', async (c) => {
   const body = await c.req.json()
-  const tenant = c.get('tenant')
-  const doId = c.env.OBJECTS.idFromName(tenant)
-  const stub = c.env.OBJECTS.get(doId)
+  const stub = getStub(c)
 
-  const res = await stub.fetch(
-    new Request('https://do/verbs/conjugate', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    }),
-  )
-
-  const result = (await res.json()) as ApiResponse
-  return c.json(result, res.status as 200 | 400)
+  const result = await stub.conjugate(body)
+  return c.json({ success: result.success, data: result.data, error: result.error }, result.status as 200 | 400)
 })
 
 /**
@@ -60,13 +47,10 @@ app.post('/conjugate', async (c) => {
  */
 app.get('/:verb', async (c) => {
   const verb = c.req.param('verb')
-  const tenant = c.get('tenant')
-  const doId = c.env.OBJECTS.idFromName(tenant)
-  const stub = c.env.OBJECTS.get(doId)
+  const stub = getStub(c)
 
-  const res = await stub.fetch(new Request(`https://do/verbs/${verb}`))
-  const result = (await res.json()) as ApiResponse
-  return c.json(result, res.status as 200 | 404)
+  const result = await stub.getVerb(verb)
+  return c.json({ success: result.success, data: result.data, error: result.error }, result.status as 200 | 404)
 })
 
 export default app

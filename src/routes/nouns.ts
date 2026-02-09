@@ -7,7 +7,8 @@
  */
 
 import { Hono } from 'hono'
-import type { AppEnv, ApiResponse } from '../types'
+import type { AppEnv } from '../types'
+import { getStub } from '../lib/tenant'
 
 const app = new Hono<AppEnv>()
 
@@ -18,32 +19,18 @@ const app = new Hono<AppEnv>()
  */
 app.post('/', async (c) => {
   const body = await c.req.json()
-  const tenant = c.get('tenant')
-  const doId = c.env.OBJECTS.idFromName(tenant)
-  const stub = c.env.OBJECTS.get(doId)
+  const stub = getStub(c)
 
-  const res = await stub.fetch(
-    new Request('https://do/define', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Tenant': tenant },
-      body: JSON.stringify(body),
-    }),
-  )
-
-  const result = (await res.json()) as ApiResponse
-  return c.json(result, res.status as 200 | 201 | 400 | 500)
+  const result = await stub.defineNoun(body)
+  return c.json({ success: result.success, data: result.data, error: result.error }, result.status as 200 | 201 | 400 | 500)
 })
 
 /**
  * GET /nouns — list all registered nouns
  */
 app.get('/', async (c) => {
-  const tenant = c.get('tenant')
-  const doId = c.env.OBJECTS.idFromName(tenant)
-  const stub = c.env.OBJECTS.get(doId)
-
-  const res = await stub.fetch(new Request('https://do/nouns'))
-  const result = (await res.json()) as ApiResponse
+  const stub = getStub(c)
+  const result = await stub.listNouns()
   return c.json(result)
 })
 
@@ -52,13 +39,10 @@ app.get('/', async (c) => {
  */
 app.get('/:name', async (c) => {
   const name = c.req.param('name')
-  const tenant = c.get('tenant')
-  const doId = c.env.OBJECTS.idFromName(tenant)
-  const stub = c.env.OBJECTS.get(doId)
+  const stub = getStub(c)
 
-  const res = await stub.fetch(new Request(`https://do/nouns/${name}`))
-  const result = (await res.json()) as ApiResponse
-  return c.json(result, res.status as 200 | 404)
+  const result = await stub.getNounSchema(name)
+  return c.json({ success: result.success, data: result.data, error: result.error }, result.status as 200 | 404)
 })
 
 export default app

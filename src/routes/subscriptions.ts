@@ -7,7 +7,8 @@
  */
 
 import { Hono } from 'hono'
-import type { AppEnv, ApiResponse } from '../types'
+import type { AppEnv } from '../types'
+import { getStub } from '../lib/tenant'
 
 const app = new Hono<AppEnv>()
 
@@ -15,34 +16,19 @@ const app = new Hono<AppEnv>()
  * POST /subscriptions — register a subscription
  */
 app.post('/', async (c) => {
-  const tenant = c.get('tenant')
-  const doId = c.env.OBJECTS.idFromName(tenant)
-  const stub = c.env.OBJECTS.get(doId)
+  const body = await c.req.json()
+  const stub = getStub(c)
 
-  const body = await c.req.text()
-
-  const res = await stub.fetch(
-    new Request('https://do/subscriptions', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body,
-    }),
-  )
-
-  const result = (await res.json()) as ApiResponse
-  return c.json(result, res.status as 200 | 201 | 400)
+  const result = await stub.createSubscription(body)
+  return c.json({ success: result.success, data: result.data, error: result.error }, result.status as 200 | 201 | 400)
 })
 
 /**
  * GET /subscriptions — list all subscriptions
  */
 app.get('/', async (c) => {
-  const tenant = c.get('tenant')
-  const doId = c.env.OBJECTS.idFromName(tenant)
-  const stub = c.env.OBJECTS.get(doId)
-
-  const res = await stub.fetch(new Request('https://do/subscriptions'))
-  const result = (await res.json()) as ApiResponse
+  const stub = getStub(c)
+  const result = await stub.listSubscriptions()
   return c.json(result)
 })
 
@@ -50,20 +36,11 @@ app.get('/', async (c) => {
  * DELETE /subscriptions/:id — remove a subscription
  */
 app.delete('/:id', async (c) => {
-  const tenant = c.get('tenant')
-  const doId = c.env.OBJECTS.idFromName(tenant)
-  const stub = c.env.OBJECTS.get(doId)
-
   const subId = c.req.param('id')
+  const stub = getStub(c)
 
-  const res = await stub.fetch(
-    new Request(`https://do/subscriptions/${subId}`, {
-      method: 'DELETE',
-    }),
-  )
-
-  const result = (await res.json()) as ApiResponse
-  return c.json(result, res.status as 200 | 404)
+  const result = await stub.deleteSubscription(subId)
+  return c.json({ success: result.success, error: result.error }, result.status as 200 | 404)
 })
 
 export default app

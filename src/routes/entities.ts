@@ -11,37 +11,26 @@
  */
 
 import { Hono } from 'hono'
-import type { AppEnv, ApiResponse } from '../types'
+import type { AppEnv } from '../types'
+import { getStub } from '../lib/tenant'
 
 const app = new Hono<AppEnv>()
-
-/**
- * Forward a request to the ObjectsDO for the current tenant
- */
-async function forward(c: { env: AppEnv['Bindings']; get: (key: 'tenant') => string }, path: string, init?: RequestInit): Promise<Response> {
-  const tenant = c.get('tenant')
-  const doId = c.env.OBJECTS.idFromName(tenant)
-  const stub = c.env.OBJECTS.get(doId)
-  const headers = new Headers(init?.headers)
-  headers.set('X-Tenant', tenant)
-  return stub.fetch(new Request(`https://do${path}`, { ...init, headers }))
-}
 
 /**
  * POST /entities/:type — create a new entity
  */
 app.post('/:type', async (c) => {
   const type = c.req.param('type')
-  const body = await c.req.text()
+  const body = await c.req.json()
+  const stub = getStub(c)
+  const tenantCtx = c.get('tenantContext')
 
-  const res = await forward(c, `/entities/${type}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body,
+  const result = await stub.createEntity(type, body, {
+    tenantId: tenantCtx?.tenantId,
+    contextUrl: tenantCtx?.contextUrl,
   })
 
-  const result = (await res.json()) as ApiResponse
-  return c.json(result, res.status as 200 | 201 | 400 | 403 | 500)
+  return c.json({ success: result.success, data: result.data, error: result.error, meta: result.meta }, result.status as 200 | 201 | 400 | 403 | 500)
 })
 
 /**
@@ -52,27 +41,66 @@ app.post('/:type', async (c) => {
 app.get('/:type', async (c) => {
   const type = c.req.param('type')
   const url = new URL(c.req.url)
-  const qs = url.search
+  const stub = getStub(c)
 
-  const res = await forward(c, `/entities/${type}${qs}`)
+  const result = await stub.listEntities(type, {
+    limit: url.searchParams.get('limit') ? parseInt(url.searchParams.get('limit')!, 10) : undefined,
+    offset: url.searchParams.get('offset') ? parseInt(url.searchParams.get('offset')!, 10) : undefined,
+    filter: url.searchParams.get('filter') ?? undefined,
+    sort: url.searchParams.get('sort') ?? undefined,
+  })
 
-  const result = (await res.json()) as ApiResponse
-  return c.json(result, res.status as 200 | 400)
+  return c.json({ success: result.success, data: result.data, error: result.error, meta: result.meta }, result.status as 200 | 400)
 })
 
 /**
  * GET /entities/:type/:id — get entity by ID
+ *
+ * Supports time travel via asOf/atVersion query params, history, and diff.
  */
+app.get('/:type/:id/history', async (c) => {
+  const type = c.req.param('type')
+  const id = c.req.param('id')
+  const stub = getStub(c)
+
+  const result = await stub.entityHistory(type, id)
+  return c.json(result)
+})
+
+app.get('/:type/:id/diff', async (c) => {
+  const type = c.req.param('type')
+  const id = c.req.param('id')
+  const url = new URL(c.req.url)
+  const stub = getStub(c)
+
+  const result = await stub.entityDiff(type, id, {
+    from: url.searchParams.get('from') ?? undefined,
+    to: url.searchParams.get('to') ?? undefined,
+  })
+
+  return c.json({ success: result.success, data: result.data, error: result.error }, result.status as 200 | 400 | 404)
+})
+
 app.get('/:type/:id', async (c) => {
   const type = c.req.param('type')
   const id = c.req.param('id')
+  const url = new URL(c.req.url)
+  const stub = getStub(c)
 
-  const res = await forward(c, `/entities/${type}/${id}`)
+  const asOf = url.searchParams.get('asOf')
+  const atVersion = url.searchParams.get('atVersion')
 
-  const result = (await res.json()) as ApiResponse
-  const etag = res.headers.get('ETag')
-  if (etag) c.header('ETag', etag)
-  return c.json(result, res.status as 200 | 404)
+  if (asOf || atVersion) {
+    const result = await stub.timeTravelGet(type, id, {
+      asOf: asOf ?? undefined,
+      atVersion: atVersion ?? undefined,
+    })
+    return c.json({ success: result.success, data: result.data, error: result.error }, result.status as 200 | 400 | 404)
+  }
+
+  const result = await stub.getEntity(type, id)
+  if (result.etag) c.header('ETag', result.etag)
+  return c.json({ success: result.success, data: result.data, error: result.error }, result.status as 200 | 404)
 })
 
 /**
@@ -81,22 +109,13 @@ app.get('/:type/:id', async (c) => {
 app.put('/:type/:id', async (c) => {
   const type = c.req.param('type')
   const id = c.req.param('id')
-  const body = await c.req.text()
-
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  const body = await c.req.json()
+  const stub = getStub(c)
   const ifMatch = c.req.header('If-Match')
-  if (ifMatch) headers['If-Match'] = ifMatch
 
-  const res = await forward(c, `/entities/${type}/${id}`, {
-    method: 'PUT',
-    headers,
-    body,
-  })
-
-  const result = (await res.json()) as ApiResponse
-  const etag = res.headers.get('ETag')
-  if (etag) c.header('ETag', etag)
-  return c.json(result, res.status as 200 | 404 | 409 | 500)
+  const result = await stub.updateEntity(type, id, body, ifMatch ? { ifMatch } : undefined)
+  if (result.etag) c.header('ETag', result.etag)
+  return c.json({ success: result.success, data: result.data, error: result.error, meta: result.meta }, result.status as 200 | 404 | 409 | 500)
 })
 
 /**
@@ -105,22 +124,13 @@ app.put('/:type/:id', async (c) => {
 app.patch('/:type/:id', async (c) => {
   const type = c.req.param('type')
   const id = c.req.param('id')
-  const body = await c.req.text()
-
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  const body = await c.req.json()
+  const stub = getStub(c)
   const ifMatch = c.req.header('If-Match')
-  if (ifMatch) headers['If-Match'] = ifMatch
 
-  const res = await forward(c, `/entities/${type}/${id}`, {
-    method: 'PUT',
-    headers,
-    body,
-  })
-
-  const result = (await res.json()) as ApiResponse
-  const etag = res.headers.get('ETag')
-  if (etag) c.header('ETag', etag)
-  return c.json(result, res.status as 200 | 404 | 409 | 500)
+  const result = await stub.updateEntity(type, id, body, ifMatch ? { ifMatch } : undefined)
+  if (result.etag) c.header('ETag', result.etag)
+  return c.json({ success: result.success, data: result.data, error: result.error, meta: result.meta }, result.status as 200 | 404 | 409 | 500)
 })
 
 /**
@@ -129,11 +139,10 @@ app.patch('/:type/:id', async (c) => {
 app.delete('/:type/:id', async (c) => {
   const type = c.req.param('type')
   const id = c.req.param('id')
+  const stub = getStub(c)
 
-  const res = await forward(c, `/entities/${type}/${id}`, { method: 'DELETE' })
-
-  const result = (await res.json()) as ApiResponse
-  return c.json(result, res.status as 200 | 403 | 404)
+  const result = await stub.deleteEntity(type, id)
+  return c.json({ success: result.success, error: result.error, meta: result.meta }, result.status as 200 | 403 | 404)
 })
 
 /**
@@ -146,41 +155,25 @@ app.post('/:type/:id/:verb', async (c) => {
   const type = c.req.param('type')
   const id = c.req.param('id')
   const verb = c.req.param('verb')
+  const stub = getStub(c)
 
   // Special case: "hooks" is not a verb — route to hook registration
   if (verb === 'hooks') {
-    return handleHookRegistration(c, type)
+    const body = await c.req.json()
+    const result = await stub.registerHook(type, body)
+    return c.json({ success: result.success, data: result.data, error: result.error }, result.status as 200 | 201 | 400)
   }
 
-  const body = await c.req.text()
+  let verbData: Record<string, unknown> | undefined
+  try {
+    const text = await c.req.text()
+    if (text) verbData = JSON.parse(text)
+  } catch {
+    // No body or invalid JSON — proceed with no data
+  }
 
-  const res = await forward(c, `/entities/${type}/${id}/${verb}`, {
-    method: 'POST',
-    headers: body ? { 'Content-Type': 'application/json' } : {},
-    body: body || undefined,
-  })
-
-  const result = (await res.json()) as ApiResponse
-  return c.json(result, res.status as 200 | 400 | 403 | 404 | 500)
+  const result = await stub.executeVerb(type, id, verb, verbData)
+  return c.json({ success: result.success, data: result.data, error: result.error, meta: result.meta }, result.status as 200 | 400 | 403 | 404 | 500)
 })
-
-/**
- * POST /entities/:type/hooks — register a hook
- */
-async function handleHookRegistration(
-  c: { req: { text: () => Promise<string> }; env: AppEnv['Bindings']; get: (key: 'tenant') => string; json: (data: unknown, status?: number) => Response },
-  type: string,
-): Promise<Response> {
-  const body = await c.req.text()
-
-  const res = await forward(c as Parameters<typeof forward>[0], `/entities/${type}/hooks`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body,
-  })
-
-  const result = (await res.json()) as ApiResponse
-  return c.json(result, res.status as 200 | 201 | 400)
-}
 
 export default app

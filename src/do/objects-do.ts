@@ -12,6 +12,9 @@
  * - Hooks are stored as registrations but runtime code execution is disabled for security
  * - Time travel: entity state can be reconstructed at any version or timestamp
  * - CDC: Server-Sent Events stream for external consumers
+ *
+ * Public methods are the RPC interface — route handlers call them directly
+ * via the DO stub, bypassing HTTP fetch.
  */
 
 import { DurableObject } from 'cloudflare:workers'
@@ -32,7 +35,7 @@ import type { StoredNounSchema, NounInstance, VerbEvent, VerbConjugation, Hook }
 // Types
 // ---------------------------------------------------------------------------
 
-interface FullEvent {
+export interface FullEvent {
   $id: string
   $type: string
   entityType: string
@@ -307,274 +310,47 @@ export class ObjectsDO extends DurableObject<Cloudflare.Env> {
   }
 
   // =========================================================================
-  // Request handler
+  // Public RPC methods — called directly by route handlers via stub
   // =========================================================================
 
-  async fetch(request: Request): Promise<Response> {
-    const url = new URL(request.url)
-    const path = url.pathname
-    const method = request.method
+  // ---- Nouns ----
 
-    try {
-      // -----------------------------------------------------------------------
-      // Tenant management
-      // -----------------------------------------------------------------------
-
-      if (path === '/tenant/provision' && method === 'POST') {
-        return this.handleProvisionTenant(request)
-      }
-
-      if (path === '/tenant/info' && method === 'GET') {
-        return this.handleTenantInfo(request)
-      }
-
-      if (path === '/tenant/stats' && method === 'GET') {
-        return this.handleTenantStats(request)
-      }
-
-      if (path === '/tenant/deactivate' && method === 'DELETE') {
-        return this.handleDeactivateTenant(request)
-      }
-
-      // -----------------------------------------------------------------------
-      // Noun management
-      // -----------------------------------------------------------------------
-
-      if (path === '/define' && method === 'POST') {
-        return this.handleDefineNoun(request)
-      }
-
-      if (path === '/nouns' && method === 'GET') {
-        return this.handleListNouns()
-      }
-
-      const nounMatch = path.match(/^\/nouns\/([^/]+)$/)
-      if (nounMatch && method === 'GET') {
-        return this.handleGetNoun(nounMatch[1]!)
-      }
-
-      // -----------------------------------------------------------------------
-      // Verb listing
-      // -----------------------------------------------------------------------
-
-      if (path === '/verbs' && method === 'GET') {
-        return this.handleListVerbs()
-      }
-
-      const verbDetailMatch = path.match(/^\/verbs\/([^/]+)$/)
-      if (verbDetailMatch && method === 'GET') {
-        return this.handleGetVerb(verbDetailMatch[1]!)
-      }
-
-      if (path === '/verbs/conjugate' && method === 'POST') {
-        return this.handleConjugate(request)
-      }
-
-      // -----------------------------------------------------------------------
-      // Entity CRUD
-      // -----------------------------------------------------------------------
-
-      // POST /entities/:type — create
-      const createMatch = path.match(/^\/entities\/([^/]+)$/)
-      if (createMatch && method === 'POST') {
-        return this.handleCreateEntity(createMatch[1]!, request)
-      }
-
-      // GET /entities/:type — list/find
-      const listMatch = path.match(/^\/entities\/([^/]+)$/)
-      if (listMatch && method === 'GET') {
-        return this.handleListEntities(listMatch[1]!, url.searchParams)
-      }
-
-      // GET /entities/:type/:id/history — entity event history (before generic get)
-      const historyMatch = path.match(/^\/entities\/([^/]+)\/([^/]+)\/history$/)
-      if (historyMatch && method === 'GET') {
-        return this.handleEntityHistory(historyMatch[1]!, historyMatch[2]!)
-      }
-
-      // GET /entities/:type/:id/diff — diff between versions (before generic get)
-      const diffMatch = path.match(/^\/entities\/([^/]+)\/([^/]+)\/diff$/)
-      if (diffMatch && method === 'GET') {
-        return this.handleEntityDiff(diffMatch[1]!, diffMatch[2]!, url.searchParams)
-      }
-
-      // GET /entities/:type/:id — get by ID (supports asOf and atVersion query params)
-      const getMatch = path.match(/^\/entities\/([^/]+)\/([^/]+)$/)
-      if (getMatch && method === 'GET') {
-        const asOf = url.searchParams.get('asOf')
-        const atVersion = url.searchParams.get('atVersion')
-        if (asOf || atVersion) {
-          return this.handleTimeTravelGet(getMatch[1]!, getMatch[2]!, url.searchParams)
-        }
-        return this.handleGetEntity(getMatch[1]!, getMatch[2]!)
-      }
-
-      // PUT /entities/:type/:id — update
-      const updateMatch = path.match(/^\/entities\/([^/]+)\/([^/]+)$/)
-      if (updateMatch && method === 'PUT') {
-        return this.handleUpdateEntity(updateMatch[1]!, updateMatch[2]!, request)
-      }
-
-      // DELETE /entities/:type/:id — soft delete
-      const deleteMatch = path.match(/^\/entities\/([^/]+)\/([^/]+)$/)
-      if (deleteMatch && method === 'DELETE') {
-        return this.handleDeleteEntity(deleteMatch[1]!, deleteMatch[2]!)
-      }
-
-      // -----------------------------------------------------------------------
-      // Verb execution
-      // -----------------------------------------------------------------------
-
-      // POST /entities/:type/:id/:verb — execute verb
-      const verbExecMatch = path.match(/^\/entities\/([^/]+)\/([^/]+)\/([^/]+)$/)
-      if (verbExecMatch && method === 'POST') {
-        return this.handleExecuteVerb(verbExecMatch[1]!, verbExecMatch[2]!, verbExecMatch[3]!, request)
-      }
-
-      // -----------------------------------------------------------------------
-      // Hooks
-      // -----------------------------------------------------------------------
-
-      // POST /entities/:type/:id/hooks — register hook
-      const hookMatch = path.match(/^\/entities\/([^/]+)\/hooks$/)
-      if (hookMatch && method === 'POST') {
-        return this.handleRegisterHook(hookMatch[1]!, request)
-      }
-
-      // -----------------------------------------------------------------------
-      // Events
-      // -----------------------------------------------------------------------
-
-      if (path === '/events' && method === 'GET') {
-        return this.handleQueryEvents(url.searchParams)
-      }
-
-      // GET /events/stream — SSE stream (CDC)
-      if (path === '/events/stream' && method === 'GET') {
-        return this.handleEventStream(url.searchParams)
-      }
-
-      // GET /events/history/:type/:id — entity event history
-      const eventHistoryMatch = path.match(/^\/events\/history\/([^/]+)\/([^/]+)$/)
-      if (eventHistoryMatch && method === 'GET') {
-        return this.handleEntityHistory(eventHistoryMatch[1]!, eventHistoryMatch[2]!)
-      }
-
-      // GET /events/:id — get single event
-      const eventGetMatch = path.match(/^\/events\/([^/]+)$/)
-      if (eventGetMatch && method === 'GET') {
-        return this.handleGetEvent(eventGetMatch[1]!)
-      }
-
-      // -----------------------------------------------------------------------
-      // Subscriptions
-      // -----------------------------------------------------------------------
-
-      if (path === '/subscriptions' && method === 'POST') {
-        return this.handleCreateSubscription(request)
-      }
-
-      if (path === '/subscriptions' && method === 'GET') {
-        return this.handleListSubscriptions()
-      }
-
-      const subDeleteMatch = path.match(/^\/subscriptions\/([^/]+)$/)
-      if (subDeleteMatch && method === 'DELETE') {
-        return this.handleDeleteSubscription(subDeleteMatch[1]!)
-      }
-
-      // -----------------------------------------------------------------------
-      // Integration Hooks
-      // -----------------------------------------------------------------------
-
-      if (path === '/integrations/hooks' && method === 'POST') {
-        return this.handleCreateIntegrationHook(request)
-      }
-
-      if (path === '/integrations/hooks' && method === 'GET') {
-        return this.handleListIntegrationHooks()
-      }
-
-      const ihookDeleteMatch = path.match(/^\/integrations\/hooks\/([^/]+)$/)
-      if (ihookDeleteMatch && method === 'DELETE') {
-        return this.handleDeleteIntegrationHook(ihookDeleteMatch[1]!)
-      }
-
-      // GET /integrations/dispatch-log — view dispatch audit log
-      if (path === '/integrations/dispatch-log' && method === 'GET') {
-        return this.handleQueryDispatchLog(url.searchParams)
-      }
-
-      // -----------------------------------------------------------------------
-      // Schema
-      // -----------------------------------------------------------------------
-
-      if (path === '/schema' && method === 'GET') {
-        return this.handleFullSchema()
-      }
-
-      if (path === '/schema/graph' && method === 'GET') {
-        return this.handleSchemaGraph()
-      }
-
-      return this.json({ success: false, error: 'Not found' }, 404)
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unknown error'
-      console.error('[ObjectsDO] Error:', message)
-      return this.json({ success: false, error: message }, 500)
-    }
-  }
-
-  // =========================================================================
-  // Noun handlers
-  // =========================================================================
-
-  private async handleDefineNoun(request: Request): Promise<Response> {
-    const body = (await request.json()) as { name: string; definition: Record<string, string | null> }
-
+  defineNoun(body: { name: string; definition: Record<string, string | null> }): { success: boolean; data?: StoredNounSchema; error?: string; status: number } {
     if (!body.name || typeof body.name !== 'string') {
-      return this.json({ success: false, error: 'Missing or invalid name' }, 400)
+      return { success: false, error: 'Missing or invalid name', status: 400 }
     }
     if (!body.definition || typeof body.definition !== 'object' || Array.isArray(body.definition)) {
-      return this.json({ success: false, error: 'Missing or invalid definition' }, 400)
+      return { success: false, error: 'Missing or invalid definition', status: 400 }
     }
-
-    // Validate PascalCase name
     if (!/^[A-Z][a-zA-Z0-9]*$/.test(body.name)) {
-      return this.json({ success: false, error: 'Noun name must be PascalCase (e.g., Contact, BlogPost)' }, 400)
+      return { success: false, error: 'Noun name must be PascalCase (e.g., Contact, BlogPost)', status: 400 }
     }
 
     const schema = parseNounDefinition(body.name, body.definition)
     const schemaJson = JSON.stringify(schema)
 
-    // Upsert — re-defining a noun updates it
     this.sql.exec("INSERT OR REPLACE INTO nouns (name, schema, created_at) VALUES (?, ?, datetime('now'))", schema.name, schemaJson)
-
-    // Invalidate cache
     this.nounCache = null
 
-    return this.json({ success: true, data: schema }, 201)
+    return { success: true, data: schema, status: 201 }
   }
 
-  private handleListNouns(): Response {
+  listNouns(): { success: boolean; data: StoredNounSchema[] } {
     const nouns = this.loadNouns()
-    const result = Array.from(nouns.values())
-    return this.json({ success: true, data: result })
+    return { success: true, data: Array.from(nouns.values()) }
   }
 
-  private handleGetNoun(name: string): Response {
+  getNounSchema(name: string): { success: boolean; data?: StoredNounSchema; error?: string; status: number } {
     const noun = this.getNoun(name)
     if (!noun) {
-      return this.json({ success: false, error: `Noun '${name}' not found` }, 404)
+      return { success: false, error: `Noun '${name}' not found`, status: 404 }
     }
-    return this.json({ success: true, data: noun })
+    return { success: true, data: noun, status: 200 }
   }
 
-  // =========================================================================
-  // Verb handlers
-  // =========================================================================
+  // ---- Verbs ----
 
-  private handleListVerbs(): Response {
+  listVerbs(): { success: boolean; data: Record<string, { conjugation: VerbConjugation; nouns: string[] }> } {
     const nouns = this.loadNouns()
     const allVerbs: Record<string, { conjugation: VerbConjugation; nouns: string[] }> = {}
 
@@ -587,10 +363,10 @@ export class ObjectsDO extends DurableObject<Cloudflare.Env> {
       }
     }
 
-    return this.json({ success: true, data: allVerbs })
+    return { success: true, data: allVerbs }
   }
 
-  private handleGetVerb(verb: string): Response {
+  getVerb(verb: string): { success: boolean; data?: { noun: string; conjugation: VerbConjugation }[]; error?: string; status: number } {
     const nouns = this.loadNouns()
     const matches: { noun: string; conjugation: VerbConjugation }[] = []
 
@@ -599,7 +375,6 @@ export class ObjectsDO extends DurableObject<Cloudflare.Env> {
       if (conj) {
         matches.push({ noun: nounName, conjugation: conj })
       }
-      // Also check by activity or event form
       for (const c of Object.values(schema.verbs)) {
         if (c.activity === verb || c.event === verb) {
           matches.push({ noun: nounName, conjugation: c })
@@ -608,22 +383,21 @@ export class ObjectsDO extends DurableObject<Cloudflare.Env> {
     }
 
     if (matches.length === 0) {
-      return this.json({ success: false, error: `Verb '${verb}' not found on any noun` }, 404)
+      return { success: false, error: `Verb '${verb}' not found on any noun`, status: 404 }
     }
 
-    return this.json({ success: true, data: matches })
+    return { success: true, data: matches, status: 200 }
   }
 
-  private async handleConjugate(request: Request): Promise<Response> {
+  async conjugate(body: { verb: string }): Promise<{ success: boolean; data?: Record<string, string>; error?: string; status: number }> {
     const { deriveVerb } = await import('../lib/linguistic')
-    const body = (await request.json()) as { verb: string }
 
     if (!body.verb || typeof body.verb !== 'string') {
-      return this.json({ success: false, error: 'Missing or invalid verb' }, 400)
+      return { success: false, error: 'Missing or invalid verb', status: 400 }
     }
 
     const derived = deriveVerb(body.verb)
-    return this.json({
+    return {
       success: true,
       data: {
         action: derived.action,
@@ -632,28 +406,29 @@ export class ObjectsDO extends DurableObject<Cloudflare.Env> {
         reverseBy: derived.reverseBy,
         reverseAt: derived.reverseAt,
       },
-    })
+      status: 200,
+    }
   }
 
-  // =========================================================================
-  // Entity handlers
-  // =========================================================================
+  // ---- Entities ----
 
-  private async handleCreateEntity(type: string, request: Request): Promise<Response> {
+  createEntity(
+    type: string,
+    data: Record<string, unknown>,
+    opts?: { tenantId?: string; contextUrl?: string },
+  ): { success: boolean; data?: NounInstance; error?: string; meta?: { eventId: string }; status: number } {
     const noun = this.getNoun(type)
     if (!noun) {
-      return this.json({ success: false, error: `Noun '${type}' is not defined. Define it first via POST /nouns` }, 400)
+      return { success: false, error: `Noun '${type}' is not defined. Define it first via POST /nouns`, status: 400 }
     }
 
-    // Check that create verb is not disabled
     if (noun.disabledVerbs.includes('create')) {
-      return this.json({ success: false, error: `Verb 'create' is disabled on ${type}` }, 403)
+      return { success: false, error: `Verb 'create' is disabled on ${type}`, status: 403 }
     }
 
-    const data = (await request.json()) as Record<string, unknown>
     const id = (data.$id as string) || generateEntityId(type)
     const now = new Date().toISOString()
-    const contextUrl = request.headers.get('X-Context-URL') ?? this.getTenantContextUrl(request)
+    const contextUrl = opts?.contextUrl ?? (opts?.tenantId ? `https://headless.ly/~${opts.tenantId}` : 'https://headless.ly/~default')
 
     const entity: NounInstance = {
       ...data,
@@ -675,39 +450,38 @@ export class ObjectsDO extends DurableObject<Cloudflare.Env> {
       now,
     )
 
-    // Emit event with full NounEvent shape
     const event = this.logEvent(type, id, 'create', entity, null, entity, contextUrl)
 
-    return this.json({ success: true, data: entity, meta: { eventId: event.$id } }, 201)
+    return { success: true, data: entity, meta: { eventId: event.$id }, status: 201 }
   }
 
-  private handleGetEntity(type: string, id: string): Response {
+  getEntity(type: string, id: string): { success: boolean; data?: NounInstance; error?: string; etag?: string; status: number } {
     const row = this.sql.exec('SELECT data FROM entities WHERE id = ? AND type = ? AND deleted_at IS NULL', id, type).toArray()[0]
 
     if (!row) {
-      return this.json({ success: false, error: 'Not found' }, 404)
+      return { success: false, error: 'Not found', status: 404 }
     }
 
     const entity = JSON.parse(row.data as string) as NounInstance
-    return this.json({ success: true, data: entity }, 200, { ETag: `"${entity.$version}"` })
+    return { success: true, data: entity, etag: `"${entity.$version}"`, status: 200 }
   }
 
-  private handleListEntities(type: string, params: URLSearchParams): Response {
-    const limit = Math.min(parseInt(params.get('limit') || '100', 10), 1000)
-    const offset = parseInt(params.get('offset') || '0', 10)
-    const filterParam = params.get('filter')
-    const sortParam = params.get('sort')
+  listEntities(
+    type: string,
+    params: { limit?: number; offset?: number; filter?: string; sort?: string },
+  ): { success: boolean; data?: NounInstance[]; error?: string; meta?: { total: number; limit: number; offset: number; hasMore: boolean }; status: number } {
+    const limit = Math.min(params.limit ?? 100, 1000)
+    const offset = params.offset ?? 0
 
-    let rows = this.sql
+    const rows = this.sql
       .exec('SELECT data FROM entities WHERE type = ? AND deleted_at IS NULL ORDER BY created_at DESC LIMIT ? OFFSET ?', type, limit, offset)
       .toArray()
 
     let entities = rows.map((r) => JSON.parse(r.data as string) as NounInstance)
 
-    // Apply filter (simple field equality)
-    if (filterParam) {
+    if (params.filter) {
       try {
-        const filter = JSON.parse(filterParam) as Record<string, unknown>
+        const filter = JSON.parse(params.filter) as Record<string, unknown>
         entities = entities.filter((e) => {
           for (const [key, value] of Object.entries(filter)) {
             if (e[key] !== value) return false
@@ -715,14 +489,13 @@ export class ObjectsDO extends DurableObject<Cloudflare.Env> {
           return true
         })
       } catch {
-        return this.json({ success: false, error: 'Invalid filter JSON' }, 400)
+        return { success: false, error: 'Invalid filter JSON', status: 400 }
       }
     }
 
-    // Sort
-    if (sortParam) {
+    if (params.sort) {
       try {
-        const sort = JSON.parse(sortParam) as Record<string, 1 | -1>
+        const sort = JSON.parse(params.sort) as Record<string, 1 | -1>
         const [field, dir] = Object.entries(sort)[0] ?? ['$createdAt', -1]
         entities.sort((a, b) => {
           const av = a[field!] as string | number
@@ -736,47 +509,53 @@ export class ObjectsDO extends DurableObject<Cloudflare.Env> {
       }
     }
 
-    // Total count
     const countRow = this.sql.exec('SELECT COUNT(*) as cnt FROM entities WHERE type = ? AND deleted_at IS NULL', type).toArray()[0]
     const total = (countRow?.cnt as number) ?? 0
 
-    return this.json({
+    return {
       success: true,
       data: entities,
       meta: { total, limit, offset, hasMore: offset + entities.length < total },
-    })
+      status: 200,
+    }
   }
 
-  private async handleUpdateEntity(type: string, id: string, request: Request): Promise<Response> {
+  updateEntity(
+    type: string,
+    id: string,
+    updates: Record<string, unknown>,
+    opts?: { ifMatch?: string },
+  ): { success: boolean; data?: NounInstance; error?: string; meta?: { eventId?: string; currentVersion?: number; expectedVersion?: number }; etag?: string; status: number } {
     const noun = this.getNoun(type)
     if (noun && noun.disabledVerbs.includes('update')) {
-      return this.json({ success: false, error: `Verb 'update' is disabled on ${type}` }, 403)
+      return { success: false, error: `Verb 'update' is disabled on ${type}`, status: 403 }
     }
 
     const row = this.sql.exec('SELECT data, version FROM entities WHERE id = ? AND type = ? AND deleted_at IS NULL', id, type).toArray()[0]
 
     if (!row) {
-      return this.json({ success: false, error: 'Not found' }, 404)
+      return { success: false, error: 'Not found', status: 404 }
     }
 
     const existing = JSON.parse(row.data as string) as NounInstance
     const currentVersion = row.version as number
-    const updates = (await request.json()) as Record<string, unknown>
 
-    // Optimistic locking: check $version or If-Match header
     let expectedVersion: number | undefined
     if (updates.$version !== undefined) {
       expectedVersion = Number(updates.$version)
-    } else {
-      const ifMatch = request.headers.get('If-Match')
-      if (ifMatch) {
-        const parsed = parseInt(ifMatch.replace(/"/g, ''), 10)
-        if (!isNaN(parsed)) expectedVersion = parsed
-      }
+    } else if (opts?.ifMatch) {
+      const parsed = parseInt(opts.ifMatch.replace(/"/g, ''), 10)
+      if (!isNaN(parsed)) expectedVersion = parsed
     }
 
     if (expectedVersion !== undefined && expectedVersion !== currentVersion) {
-      return this.json({ success: false, error: 'Version conflict', meta: { currentVersion, expectedVersion } }, 409, { ETag: `"${currentVersion}"` })
+      return {
+        success: false,
+        error: 'Version conflict',
+        meta: { currentVersion, expectedVersion },
+        etag: `"${currentVersion}"`,
+        status: 409,
+      }
     }
 
     const { $version: _v, $id: _i, $type: _t, $context: _c, $createdAt: _ca, ...userUpdates } = updates
@@ -798,90 +577,75 @@ export class ObjectsDO extends DurableObject<Cloudflare.Env> {
 
     const event = this.logEvent(type, id, 'update', updated, existing, updated, existing.$context)
 
-    return this.json({ success: true, data: updated, meta: { eventId: event.$id } }, 200, { ETag: `"${nextVersion}"` })
+    return { success: true, data: updated, meta: { eventId: event.$id }, etag: `"${nextVersion}"`, status: 200 }
   }
 
-  private handleDeleteEntity(type: string, id: string): Response {
+  deleteEntity(type: string, id: string): { success: boolean; error?: string; meta?: { eventId: string }; status: number } {
     const noun = this.getNoun(type)
     if (noun && noun.disabledVerbs.includes('delete')) {
-      return this.json({ success: false, error: `Verb 'delete' is disabled on ${type}` }, 403)
+      return { success: false, error: `Verb 'delete' is disabled on ${type}`, status: 403 }
     }
 
     const row = this.sql.exec('SELECT data FROM entities WHERE id = ? AND type = ? AND deleted_at IS NULL', id, type).toArray()[0]
 
     if (!row) {
-      return this.json({ success: false, error: 'Not found' }, 404)
+      return { success: false, error: 'Not found', status: 404 }
     }
 
     const existing = JSON.parse(row.data as string) as NounInstance
     const now = new Date().toISOString()
 
-    // Soft delete
     this.sql.exec('UPDATE entities SET deleted_at = ?, updated_at = ? WHERE id = ?', now, now, id)
 
     const event = this.logEvent(type, id, 'delete', null, existing, null, existing.$context)
 
-    return this.json({ success: true, meta: { eventId: event.$id } })
+    return { success: true, meta: { eventId: event.$id }, status: 200 }
   }
 
-  // =========================================================================
-  // Verb execution
-  // =========================================================================
-
-  private async handleExecuteVerb(type: string, id: string, verb: string, request: Request): Promise<Response> {
+  executeVerb(
+    type: string,
+    id: string,
+    verb: string,
+    verbData?: Record<string, unknown>,
+  ): { success: boolean; data?: NounInstance; error?: string; meta?: { event: FullEvent }; status: number } {
     const noun = this.getNoun(type)
     if (!noun) {
-      return this.json({ success: false, error: `Noun '${type}' is not defined` }, 400)
+      return { success: false, error: `Noun '${type}' is not defined`, status: 400 }
     }
 
-    // Resolve verb — check action form, then activity/event forms
     const conj = noun.verbs[verb]
     if (!conj) {
-      // Check if it's a known verb by activity or event form
       const verbEntry = Object.values(noun.verbs).find((v) => v.activity === verb || v.event === verb)
       if (!verbEntry) {
-        return this.json({ success: false, error: `Verb '${verb}' is not defined on ${type}` }, 400)
+        return { success: false, error: `Verb '${verb}' is not defined on ${type}`, status: 400 }
       }
-      // Don't allow calling by activity/event form — only action form
-      return this.json({ success: false, error: `Use the action form '${verbEntry.action}' instead of '${verb}'` }, 400)
+      return { success: false, error: `Use the action form '${verbEntry.action}' instead of '${verb}'`, status: 400 }
     }
 
-    // Check disabled
     if (noun.disabledVerbs.includes(verb)) {
-      return this.json({ success: false, error: `Verb '${verb}' is disabled on ${type}` }, 403)
+      return { success: false, error: `Verb '${verb}' is disabled on ${type}`, status: 403 }
     }
 
-    // Fetch entity
     const row = this.sql.exec('SELECT data, version FROM entities WHERE id = ? AND type = ? AND deleted_at IS NULL', id, type).toArray()[0]
 
     if (!row) {
-      return this.json({ success: false, error: 'Not found' }, 404)
+      return { success: false, error: 'Not found', status: 404 }
     }
 
     const existing = JSON.parse(row.data as string) as NounInstance
     const currentVersion = row.version as number
 
-    let verbData: Record<string, unknown> = {}
-    try {
-      const body = await request.text()
-      if (body) verbData = JSON.parse(body)
-    } catch {
-      // No body or invalid JSON — proceed with empty data
-    }
-
-    // Run BEFORE hooks
     const beforeHooks = this.getHooks(type, verb, 'before')
     for (const hook of beforeHooks) {
       console.warn(`[ObjectsDO] Runtime hook execution disabled for security — hook: ${type}.${verb}:before`)
     }
 
-    // Apply verb data as an update
     const now = new Date().toISOString()
     const nextVersion = currentVersion + 1
 
     const updated: NounInstance = {
       ...existing,
-      ...verbData,
+      ...(verbData ?? {}),
       $id: id,
       $type: type,
       $context: existing.$context,
@@ -892,49 +656,671 @@ export class ObjectsDO extends DurableObject<Cloudflare.Env> {
 
     this.sql.exec('UPDATE entities SET data = ?, version = ?, updated_at = ? WHERE id = ?', JSON.stringify(updated), nextVersion, now, id)
 
-    // Emit event: Contact.qualified with before/after state
     const event = this.logEvent(type, id, verb, updated, existing, updated, existing.$context)
 
-    // Run AFTER hooks
     const afterHooks = this.getHooks(type, verb, 'after')
     for (const hook of afterHooks) {
       console.warn(`[ObjectsDO] Runtime hook execution disabled for security — hook: ${type}.${verb}:after`)
     }
 
-    return this.json({ success: true, data: updated, meta: { event } })
+    return { success: true, data: updated, meta: { event }, status: 200 }
   }
 
-  // =========================================================================
-  // Hooks
-  // =========================================================================
-
-  private async handleRegisterHook(type: string, request: Request): Promise<Response> {
+  registerHook(
+    type: string,
+    body: { verb: string; phase: 'before' | 'after'; code: string },
+  ): { success: boolean; data?: { noun: string; verb: string; phase: string }; error?: string; status: number } {
     const noun = this.getNoun(type)
     if (!noun) {
-      return this.json({ success: false, error: `Noun '${type}' is not defined` }, 400)
+      return { success: false, error: `Noun '${type}' is not defined`, status: 400 }
     }
-
-    const body = (await request.json()) as { verb: string; phase: 'before' | 'after'; code: string }
 
     if (!body.verb || typeof body.verb !== 'string') {
-      return this.json({ success: false, error: 'Missing or invalid verb' }, 400)
+      return { success: false, error: 'Missing or invalid verb', status: 400 }
     }
     if (!body.phase || (body.phase !== 'before' && body.phase !== 'after')) {
-      return this.json({ success: false, error: "phase must be 'before' or 'after'" }, 400)
+      return { success: false, error: "phase must be 'before' or 'after'", status: 400 }
     }
     if (!body.code || typeof body.code !== 'string') {
-      return this.json({ success: false, error: 'Missing or invalid code' }, 400)
+      return { success: false, error: 'Missing or invalid code', status: 400 }
     }
 
-    // Verify verb exists on noun
     if (!noun.verbs[body.verb]) {
-      return this.json({ success: false, error: `Verb '${body.verb}' is not defined on ${type}` }, 400)
+      return { success: false, error: `Verb '${body.verb}' is not defined on ${type}`, status: 400 }
     }
 
     this.sql.exec('INSERT INTO hooks (noun, verb, phase, code) VALUES (?, ?, ?, ?)', type, body.verb, body.phase, body.code)
 
-    return this.json({ success: true, data: { noun: type, verb: body.verb, phase: body.phase } }, 201)
+    return { success: true, data: { noun: type, verb: body.verb, phase: body.phase }, status: 201 }
   }
+
+  // ---- Time Travel ----
+
+  timeTravelGet(
+    type: string,
+    id: string,
+    params: { asOf?: string; atVersion?: string },
+  ): { success: boolean; data?: Record<string, unknown>; error?: string; status: number } {
+    const asOf = params.asOf
+    const atVersionStr = params.atVersion
+
+    let eventsQuery = 'SELECT * FROM events WHERE entity_type = ? AND entity_id = ?'
+    const values: (string | number)[] = [type, id]
+
+    if (atVersionStr) {
+      const atVersion = parseInt(atVersionStr, 10)
+      if (isNaN(atVersion)) {
+        return { success: false, error: 'Invalid atVersion parameter', status: 400 }
+      }
+      eventsQuery += ' AND sequence <= ?'
+      values.push(atVersion)
+    }
+
+    if (asOf) {
+      eventsQuery += ' AND timestamp <= ?'
+      values.push(asOf)
+    }
+
+    eventsQuery += ' ORDER BY sequence ASC'
+
+    const rows = this.sql.exec(eventsQuery, ...values).toArray()
+
+    if (rows.length === 0) {
+      return { success: false, error: 'No events found for this entity at the specified point in time', status: 404 }
+    }
+
+    const state = this.replayEvents(rows.map((r) => this.rowToFullEvent(r)))
+
+    if (!state) {
+      return { success: false, error: 'Could not reconstruct state', status: 404 }
+    }
+
+    return { success: true, data: state, status: 200 }
+  }
+
+  entityDiff(
+    type: string,
+    id: string,
+    params: { from?: string; to?: string },
+  ): {
+    success: boolean
+    data?: { before: Record<string, unknown> | null; after: Record<string, unknown> | null; events: FullEvent[]; changes: Array<{ field: string; from: unknown; to: unknown }> }
+    error?: string
+    status: number
+  } {
+    if (!params.from || !params.to) {
+      return { success: false, error: 'Both from and to parameters are required', status: 400 }
+    }
+
+    const fromVersion = parseInt(params.from, 10)
+    const toVersion = parseInt(params.to, 10)
+
+    if (isNaN(fromVersion) || isNaN(toVersion)) {
+      return { success: false, error: 'from and to must be valid integers', status: 400 }
+    }
+
+    const allRows = this.sql
+      .exec('SELECT * FROM events WHERE entity_type = ? AND entity_id = ? ORDER BY sequence ASC', type, id)
+      .toArray()
+
+    if (allRows.length === 0) {
+      return { success: false, error: 'No events found for this entity', status: 404 }
+    }
+
+    const allEvents = allRows.map((r) => this.rowToFullEvent(r))
+
+    const fromEvents = allEvents.filter((e) => e.sequence <= fromVersion)
+    const toEvents = allEvents.filter((e) => e.sequence <= toVersion)
+    const betweenEvents = allEvents.filter((e) => e.sequence > fromVersion && e.sequence <= toVersion)
+
+    const beforeState = this.replayEvents(fromEvents)
+    const afterState = this.replayEvents(toEvents)
+
+    const changes = this.computeChanges(beforeState, afterState)
+
+    return {
+      success: true,
+      data: { before: beforeState, after: afterState, events: betweenEvents, changes },
+      status: 200,
+    }
+  }
+
+  entityHistory(entityType: string, entityId: string): { success: boolean; data: FullEvent[] } {
+    const rows = this.sql
+      .exec('SELECT * FROM events WHERE entity_type = ? AND entity_id = ? ORDER BY sequence ASC', entityType, entityId)
+      .toArray()
+
+    return { success: true, data: rows.map((r) => this.rowToFullEvent(r)) }
+  }
+
+  // ---- Events ----
+
+  queryEvents(params: {
+    since?: string
+    type?: string
+    entityId?: string
+    verb?: string
+    limit?: number
+  }): { success: boolean; data: FullEvent[] } {
+    const limit = Math.min(params.limit ?? 100, 1000)
+
+    let query = 'SELECT * FROM events'
+    const conditions: string[] = []
+    const values: (string | number)[] = []
+
+    if (params.since) {
+      conditions.push('timestamp > ?')
+      values.push(params.since)
+    }
+    if (params.type) {
+      conditions.push('entity_type = ?')
+      values.push(params.type)
+    }
+    if (params.entityId) {
+      conditions.push('entity_id = ?')
+      values.push(params.entityId)
+    }
+    if (params.verb) {
+      conditions.push('verb = ?')
+      values.push(params.verb)
+    }
+
+    if (conditions.length > 0) {
+      query += ' WHERE ' + conditions.join(' AND ')
+    }
+
+    query += ' ORDER BY timestamp DESC LIMIT ?'
+    values.push(limit)
+
+    const rows = this.sql.exec(query, ...values).toArray()
+
+    return { success: true, data: rows.map((r) => this.rowToFullEvent(r)) }
+  }
+
+  getEvent(eventId: string): { success: boolean; data?: FullEvent; error?: string; status: number } {
+    const rows = this.sql.exec('SELECT * FROM events WHERE id = ?', eventId).toArray()
+
+    if (rows.length === 0) {
+      return { success: false, error: 'Event not found', status: 404 }
+    }
+
+    return { success: true, data: this.rowToFullEvent(rows[0]), status: 200 }
+  }
+
+  /**
+   * Returns SSE stream response for CDC. This is the one method that still
+   * returns a Response because SSE streams require raw Response construction.
+   */
+  getEventStream(params: { since?: string; types?: string; verbs?: string }): Response {
+    const sinceId = params.since
+    const types = params.types ? params.types.split(',') : null
+    const verbs = params.verbs ? params.verbs.split(',') : null
+
+    const sql = this.sql
+    const encoder = new TextEncoder()
+
+    let bufferedQuery = 'SELECT * FROM events'
+    const conditions: string[] = []
+    const values: (string | number)[] = []
+
+    if (sinceId) {
+      const cursorRow = sql.exec('SELECT timestamp FROM events WHERE id = ?', sinceId).toArray()[0]
+      if (cursorRow) {
+        conditions.push('(timestamp > ? OR (timestamp = ? AND id > ?))')
+        values.push(cursorRow.timestamp as string, cursorRow.timestamp as string, sinceId)
+      }
+    }
+
+    if (types) {
+      const placeholders = types.map(() => '?').join(', ')
+      conditions.push(`entity_type IN (${placeholders})`)
+      values.push(...types)
+    }
+
+    if (verbs) {
+      const placeholders = verbs.map(() => '?').join(', ')
+      conditions.push(`verb IN (${placeholders})`)
+      values.push(...verbs)
+    }
+
+    if (conditions.length > 0) {
+      bufferedQuery += ' WHERE ' + conditions.join(' AND ')
+    }
+
+    bufferedQuery += ' ORDER BY timestamp ASC, id ASC'
+
+    const rowToEvent = this.rowToFullEvent.bind(this)
+
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        const rows = sql.exec(bufferedQuery, ...values).toArray()
+        for (const row of rows) {
+          const event = rowToEvent(row)
+          const sseMsg = `id: ${event.$id}\nevent: ${event.$type}\ndata: ${JSON.stringify(event)}\n\n`
+          controller.enqueue(encoder.encode(sseMsg))
+        }
+
+        controller.enqueue(encoder.encode(': heartbeat\n\n'))
+        controller.close()
+      },
+    })
+
+    return new Response(stream, {
+      status: 200,
+      headers: {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        Connection: 'keep-alive',
+        'X-Accel-Buffering': 'no',
+      },
+    })
+  }
+
+  // ---- Subscriptions ----
+
+  createSubscription(body: {
+    pattern: string
+    mode: 'webhook' | 'websocket'
+    endpoint: string
+    secret?: string
+  }): { success: boolean; data?: Record<string, unknown>; error?: string; status: number } {
+    if (!body.pattern || typeof body.pattern !== 'string') {
+      return { success: false, error: 'Missing or invalid pattern', status: 400 }
+    }
+    if (!body.mode || (body.mode !== 'webhook' && body.mode !== 'websocket')) {
+      return { success: false, error: "mode must be 'webhook' or 'websocket'", status: 400 }
+    }
+    if (!body.endpoint || typeof body.endpoint !== 'string') {
+      return { success: false, error: 'Missing or invalid endpoint', status: 400 }
+    }
+
+    const id = generateSubscriptionId()
+    const now = new Date().toISOString()
+
+    this.sql.exec(
+      'INSERT INTO subscriptions (id, pattern, mode, endpoint, secret, active, created_at) VALUES (?, ?, ?, ?, ?, 1, ?)',
+      id,
+      body.pattern,
+      body.mode,
+      body.endpoint,
+      body.secret ?? null,
+      now,
+    )
+
+    return {
+      success: true,
+      data: {
+        id,
+        pattern: body.pattern,
+        mode: body.mode,
+        endpoint: body.endpoint,
+        active: true,
+        createdAt: now,
+      },
+      status: 201,
+    }
+  }
+
+  listSubscriptions(): { success: boolean; data: Record<string, unknown>[] } {
+    const rows = this.sql.exec('SELECT * FROM subscriptions ORDER BY created_at DESC').toArray()
+
+    const subs = rows.map((r) => ({
+      id: r.id as string,
+      pattern: r.pattern as string,
+      mode: r.mode as string,
+      endpoint: r.endpoint as string,
+      active: (r.active as number) === 1,
+      createdAt: r.created_at as string,
+    }))
+
+    return { success: true, data: subs }
+  }
+
+  deleteSubscription(subId: string): { success: boolean; error?: string; status: number } {
+    const rows = this.sql.exec('SELECT id FROM subscriptions WHERE id = ?', subId).toArray()
+
+    if (rows.length === 0) {
+      return { success: false, error: 'Subscription not found', status: 404 }
+    }
+
+    this.sql.exec('DELETE FROM subscriptions WHERE id = ?', subId)
+
+    return { success: true, status: 200 }
+  }
+
+  // ---- Integration Hooks ----
+
+  createIntegrationHook(body: {
+    entityType: string
+    verb: string
+    service: string
+    method: string
+    config?: Record<string, unknown>
+  }): { success: boolean; data?: Record<string, unknown>; error?: string; status: number } {
+    if (!body.entityType || typeof body.entityType !== 'string') {
+      return { success: false, error: 'Missing or invalid entityType', status: 400 }
+    }
+    if (!body.verb || typeof body.verb !== 'string') {
+      return { success: false, error: 'Missing or invalid verb', status: 400 }
+    }
+    if (!body.service || typeof body.service !== 'string') {
+      return { success: false, error: 'Missing or invalid service', status: 400 }
+    }
+
+    const validServices: ServiceName[] = ['PAYMENTS', 'REPO', 'INTEGRATIONS', 'OAUTH', 'EVENTS']
+    if (!validServices.includes(body.service as ServiceName)) {
+      return { success: false, error: `Invalid service. Must be one of: ${validServices.join(', ')}`, status: 400 }
+    }
+
+    if (!body.method || typeof body.method !== 'string') {
+      return { success: false, error: 'Missing or invalid method (e.g., "POST /customers/sync")', status: 400 }
+    }
+
+    const id = `ihook_${generateSqid(12)}`
+    const now = new Date().toISOString()
+
+    this.sql.exec(
+      'INSERT INTO integration_hooks (id, entity_type, verb, service, method, config, active, created_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?)',
+      id,
+      body.entityType,
+      body.verb,
+      body.service,
+      body.method,
+      body.config ? JSON.stringify(body.config) : null,
+      now,
+    )
+
+    return {
+      success: true,
+      data: {
+        id,
+        entityType: body.entityType,
+        verb: body.verb,
+        service: body.service,
+        method: body.method,
+        config: body.config ?? null,
+        active: true,
+        createdAt: now,
+      },
+      status: 201,
+    }
+  }
+
+  listIntegrationHooks(): { success: boolean; data: { builtin: Record<string, unknown>[]; tenant: Record<string, unknown>[] } } {
+    const rows = this.sql.exec('SELECT * FROM integration_hooks ORDER BY created_at DESC').toArray()
+
+    const tenantHooks = rows.map((r) => ({
+      id: r.id as string,
+      entityType: r.entity_type as string,
+      verb: r.verb as string,
+      service: r.service as string,
+      method: r.method as string,
+      config: r.config ? JSON.parse(r.config as string) : null,
+      active: (r.active as number) === 1,
+      createdAt: r.created_at as string,
+      builtin: false,
+    }))
+
+    const builtinList = BUILTIN_HOOKS.map((h: { entityType: string; verb: string; service: string; method: string }) => ({
+      id: `builtin:${h.service}:${h.method}`,
+      entityType: h.entityType,
+      verb: h.verb,
+      service: h.service,
+      method: h.method,
+      config: null,
+      active: true,
+      createdAt: null,
+      builtin: true,
+    }))
+
+    return { success: true, data: { builtin: builtinList, tenant: tenantHooks } }
+  }
+
+  deleteIntegrationHook(hookId: string): { success: boolean; error?: string; status: number } {
+    if (hookId.startsWith('builtin:')) {
+      return { success: false, error: 'Cannot delete built-in hooks', status: 403 }
+    }
+
+    const rows = this.sql.exec('SELECT id FROM integration_hooks WHERE id = ?', hookId).toArray()
+
+    if (rows.length === 0) {
+      return { success: false, error: 'Integration hook not found', status: 404 }
+    }
+
+    this.sql.exec('DELETE FROM integration_hooks WHERE id = ?', hookId)
+
+    return { success: true, status: 200 }
+  }
+
+  queryDispatchLog(params: {
+    eventId?: string
+    service?: string
+    status?: string
+    limit?: number
+  }): { success: boolean; data: Record<string, unknown>[] } {
+    const limit = Math.min(params.limit ?? 100, 1000)
+
+    let query = 'SELECT * FROM dispatch_log'
+    const conditions: string[] = []
+    const values: (string | number)[] = []
+
+    if (params.eventId) {
+      conditions.push('event_id = ?')
+      values.push(params.eventId)
+    }
+    if (params.service) {
+      conditions.push('service = ?')
+      values.push(params.service)
+    }
+    if (params.status) {
+      conditions.push('status = ?')
+      values.push(params.status)
+    }
+
+    if (conditions.length > 0) {
+      query += ' WHERE ' + conditions.join(' AND ')
+    }
+
+    query += ' ORDER BY timestamp DESC LIMIT ?'
+    values.push(limit)
+
+    const rows = this.sql.exec(query, ...values).toArray()
+
+    const results = rows.map((r) => ({
+      id: r.id as string,
+      eventId: r.event_id as string,
+      hookId: r.hook_id as string,
+      service: r.service as string,
+      method: r.method as string,
+      status: r.status as string,
+      statusCode: r.status_code as number | null,
+      error: r.error as string | null,
+      durationMs: r.duration_ms as number,
+      timestamp: r.timestamp as string,
+    }))
+
+    return { success: true, data: results }
+  }
+
+  // ---- Schema ----
+
+  fullSchema(): { success: boolean; data: Record<string, unknown> } {
+    const nouns = this.loadNouns()
+    const schema: Record<string, unknown> = {}
+
+    for (const [name, nounSchema] of nouns) {
+      schema[name] = {
+        ...nounSchema,
+        entityCount: this.getEntityCount(name),
+      }
+    }
+
+    return { success: true, data: schema }
+  }
+
+  schemaGraph(): { success: boolean; data: { nodes: { id: string; label: string; entityCount: number }[]; edges: { source: string; target: string; label: string; type: string }[] } } {
+    const nouns = this.loadNouns()
+    const nodes: { id: string; label: string; entityCount: number }[] = []
+    const edges: { source: string; target: string; label: string; type: string }[] = []
+
+    for (const [name, nounSchema] of nouns) {
+      nodes.push({
+        id: name,
+        label: name,
+        entityCount: this.getEntityCount(name),
+      })
+
+      for (const [relName, rel] of Object.entries(nounSchema.relationships)) {
+        if (rel.targetType) {
+          edges.push({
+            source: name,
+            target: rel.targetType,
+            label: relName,
+            type: rel.operator ?? '->',
+          })
+        }
+      }
+    }
+
+    return { success: true, data: { nodes, edges } }
+  }
+
+  // ---- Tenant Management ----
+
+  provisionTenant(body: {
+    tenantId: string
+    name?: string
+    plan?: string
+  }): { success: boolean; data?: Record<string, unknown>; error?: string; status: number } {
+    const tenantId = body.tenantId
+    if (!tenantId) {
+      return { success: false, error: 'Missing tenant ID', status: 400 }
+    }
+
+    const existing = this.sql.exec("SELECT value FROM tenant_meta WHERE key = 'status'").toArray()[0]
+    if (existing && (existing.value as string) === 'active') {
+      return { success: false, error: 'Tenant already provisioned', status: 409 }
+    }
+
+    const now = new Date().toISOString()
+    this.sql.exec("INSERT OR REPLACE INTO tenant_meta (key, value) VALUES ('tenantId', ?)", tenantId)
+    this.sql.exec("INSERT OR REPLACE INTO tenant_meta (key, value) VALUES ('status', 'active')")
+    this.sql.exec("INSERT OR REPLACE INTO tenant_meta (key, value) VALUES ('createdAt', ?)", now)
+    if (body.name) {
+      this.sql.exec("INSERT OR REPLACE INTO tenant_meta (key, value) VALUES ('name', ?)", body.name)
+    }
+    if (body.plan) {
+      this.sql.exec("INSERT OR REPLACE INTO tenant_meta (key, value) VALUES ('plan', ?)", body.plan)
+    }
+
+    return {
+      success: true,
+      data: {
+        tenantId,
+        name: body.name ?? tenantId,
+        plan: body.plan ?? 'free',
+        status: 'active',
+        contextUrl: `https://headless.ly/~${tenantId}`,
+        createdAt: now,
+      },
+      status: 201,
+    }
+  }
+
+  tenantInfo(tenantId?: string): { success: boolean; data?: Record<string, unknown>; error?: string; status: number } {
+    const rows = this.sql.exec('SELECT key, value FROM tenant_meta').toArray()
+
+    if (rows.length === 0) {
+      return { success: false, error: 'Tenant not found', status: 404 }
+    }
+
+    const meta: Record<string, string> = {}
+    for (const row of rows) {
+      meta[row.key as string] = row.value as string
+    }
+
+    return {
+      success: true,
+      data: {
+        tenantId: meta.tenantId ?? tenantId,
+        name: meta.name ?? meta.tenantId,
+        plan: meta.plan ?? 'free',
+        status: meta.status ?? 'active',
+        contextUrl: `https://headless.ly/~${meta.tenantId ?? tenantId}`,
+        createdAt: meta.createdAt,
+      },
+      status: 200,
+    }
+  }
+
+  tenantStats(tenantId?: string): { success: boolean; data: Record<string, unknown> } {
+    const entityRows = this.sql.exec('SELECT type, COUNT(*) as cnt FROM entities WHERE deleted_at IS NULL GROUP BY type').toArray()
+    const entityCounts: Record<string, number> = {}
+    let totalEntities = 0
+    for (const row of entityRows) {
+      const count = row.cnt as number
+      entityCounts[row.type as string] = count
+      totalEntities += count
+    }
+
+    const eventRow = this.sql.exec('SELECT COUNT(*) as cnt FROM events').toArray()[0]
+    const totalEvents = (eventRow?.cnt as number) ?? 0
+
+    const nounRow = this.sql.exec('SELECT COUNT(*) as cnt FROM nouns').toArray()[0]
+    const totalNouns = (nounRow?.cnt as number) ?? 0
+
+    const relRow = this.sql.exec('SELECT COUNT(*) as cnt FROM relationships').toArray()[0]
+    const totalRelationships = (relRow?.cnt as number) ?? 0
+
+    const hookRow = this.sql.exec('SELECT COUNT(*) as cnt FROM hooks').toArray()[0]
+    const totalHooks = (hookRow?.cnt as number) ?? 0
+
+    return {
+      success: true,
+      data: {
+        tenantId,
+        nouns: totalNouns,
+        entities: {
+          total: totalEntities,
+          byType: entityCounts,
+        },
+        events: totalEvents,
+        relationships: totalRelationships,
+        hooks: totalHooks,
+      },
+    }
+  }
+
+  deactivateTenant(tenantId?: string): { success: boolean; data?: Record<string, unknown>; error?: string; status: number } {
+    const rows = this.sql.exec("SELECT value FROM tenant_meta WHERE key = 'status'").toArray()
+
+    if (rows.length === 0) {
+      return { success: false, error: 'Tenant not found', status: 404 }
+    }
+
+    const currentStatus = rows[0]!.value as string
+    if (currentStatus === 'deactivated') {
+      return { success: false, error: 'Tenant already deactivated', status: 400 }
+    }
+
+    const now = new Date().toISOString()
+    this.sql.exec("INSERT OR REPLACE INTO tenant_meta (key, value) VALUES ('status', 'deactivated')")
+    this.sql.exec("INSERT OR REPLACE INTO tenant_meta (key, value) VALUES ('deactivatedAt', ?)", now)
+
+    return {
+      success: true,
+      data: {
+        tenantId,
+        status: 'deactivated',
+        deactivatedAt: now,
+      },
+      status: 200,
+    }
+  }
+
+  // =========================================================================
+  // Private helpers
+  // =========================================================================
 
   private getHooks(noun: string, verb: string, phase: 'before' | 'after'): Hook[] {
     const rows = this.sql.exec('SELECT noun, verb, phase, code, created_at FROM hooks WHERE noun = ? AND verb = ? AND phase = ?', noun, verb, phase).toArray()
@@ -947,10 +1333,6 @@ export class ObjectsDO extends DurableObject<Cloudflare.Env> {
       createdAt: r.created_at as string,
     }))
   }
-
-  // =========================================================================
-  // Events
-  // =========================================================================
 
   /**
    * Log a full NounEvent with conjugation, before/after state, and monotonic sequence.
@@ -970,7 +1352,6 @@ export class ObjectsDO extends DurableObject<Cloudflare.Env> {
     const eventType = `${entityType}.${verb}`
     const conj = conjugateVerb(verb)
 
-    // Compute next sequence for this entity
     const seqRow = this.sql.exec('SELECT MAX(sequence) as max_seq FROM events WHERE entity_type = ? AND entity_id = ?', entityType, entityId).toArray()[0]
     const currentSeq = (seqRow?.max_seq as number) ?? 0
     const nextSeq = currentSeq + 1
@@ -1006,10 +1387,7 @@ export class ObjectsDO extends DurableObject<Cloudflare.Env> {
       now,
     )
 
-    // Dispatch to subscriptions (fire-and-forget)
     this.dispatchToSubscriptions(event)
-
-    // Dispatch to integration hooks (fire-and-forget)
     this.dispatchIntegrations(event, contextUrl ?? `https://headless.ly/~default`)
 
     return event
@@ -1019,10 +1397,6 @@ export class ObjectsDO extends DurableObject<Cloudflare.Env> {
   // Integration hook dispatch
   // =========================================================================
 
-  /**
-   * Build the service bindings map from the environment.
-   * Returns only the bindings that are available (non-null).
-   */
   private getServiceBindings(): ServiceBindings {
     const bindings: ServiceBindings = {}
     const env = this.env as Record<string, unknown>
@@ -1035,9 +1409,6 @@ export class ObjectsDO extends DurableObject<Cloudflare.Env> {
     return bindings
   }
 
-  /**
-   * Load tenant-configured integration hooks from SQLite.
-   */
   private loadIntegrationHooks(entityType: string, verb: string): IntegrationHook[] {
     const rows = this.sql
       .exec(
@@ -1059,14 +1430,9 @@ export class ObjectsDO extends DurableObject<Cloudflare.Env> {
     }))
   }
 
-  /**
-   * Dispatch an event to all matching integration hooks.
-   * Fire-and-forget: errors are caught, logged, and stored in dispatch_log.
-   */
   private dispatchIntegrations(event: FullEvent, contextUrl: string): void {
     const services = this.getServiceBindings()
 
-    // If no services are bound, skip dispatch entirely
     if (Object.keys(services).length === 0) return
 
     const tenantHooks = this.loadIntegrationHooks(event.entityType, event.verb)
@@ -1084,7 +1450,6 @@ export class ObjectsDO extends DurableObject<Cloudflare.Env> {
       timestamp: event.timestamp,
     }
 
-    // Fire-and-forget: dispatch in background, log results
     dispatchIntegrationHooks(services, payload, tenantHooks)
       .then((results) => {
         this.logDispatchResults(event.$id, results)
@@ -1094,9 +1459,6 @@ export class ObjectsDO extends DurableObject<Cloudflare.Env> {
       })
   }
 
-  /**
-   * Store dispatch results in the dispatch_log table for audit/time-travel.
-   */
   private logDispatchResults(eventId: string, results: DispatchResult[]): void {
     for (const result of results) {
       const id = `dsp_${generateSqid(12)}`
@@ -1116,427 +1478,94 @@ export class ObjectsDO extends DurableObject<Cloudflare.Env> {
     }
   }
 
-  // =========================================================================
-  // Integration Hook Management
-  // =========================================================================
+  private dispatchToSubscriptions(event: FullEvent): void {
+    const rows = this.sql.exec('SELECT * FROM subscriptions WHERE active = 1').toArray()
 
-  /**
-   * POST /integrations/hooks — register a new integration hook
-   */
-  private async handleCreateIntegrationHook(request: Request): Promise<Response> {
-    const body = (await request.json()) as {
-      entityType: string
-      verb: string
-      service: string
-      method: string
-      config?: Record<string, unknown>
-    }
+    for (const row of rows) {
+      const sub: StoredSubscription = {
+        id: row.id as string,
+        pattern: row.pattern as string,
+        mode: row.mode as 'webhook' | 'websocket',
+        endpoint: row.endpoint as string,
+        secret: row.secret as string | null,
+        active: row.active as number,
+        created_at: row.created_at as string,
+      }
 
-    if (!body.entityType || typeof body.entityType !== 'string') {
-      return this.json({ success: false, error: 'Missing or invalid entityType' }, 400)
-    }
-    if (!body.verb || typeof body.verb !== 'string') {
-      return this.json({ success: false, error: 'Missing or invalid verb' }, 400)
-    }
-    if (!body.service || typeof body.service !== 'string') {
-      return this.json({ success: false, error: 'Missing or invalid service' }, 400)
-    }
+      if (!this.matchesPattern(sub.pattern, event.$type)) continue
 
-    const validServices: ServiceName[] = ['PAYMENTS', 'REPO', 'INTEGRATIONS', 'OAUTH', 'EVENTS']
-    if (!validServices.includes(body.service as ServiceName)) {
-      return this.json({ success: false, error: `Invalid service. Must be one of: ${validServices.join(', ')}` }, 400)
-    }
-
-    if (!body.method || typeof body.method !== 'string') {
-      return this.json({ success: false, error: 'Missing or invalid method (e.g., "POST /customers/sync")' }, 400)
-    }
-
-    const id = `ihook_${generateSqid(12)}`
-    const now = new Date().toISOString()
-
-    this.sql.exec(
-      'INSERT INTO integration_hooks (id, entity_type, verb, service, method, config, active, created_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?)',
-      id,
-      body.entityType,
-      body.verb,
-      body.service,
-      body.method,
-      body.config ? JSON.stringify(body.config) : null,
-      now,
-    )
-
-    return this.json(
-      {
-        success: true,
-        data: {
-          id,
-          entityType: body.entityType,
-          verb: body.verb,
-          service: body.service,
-          method: body.method,
-          config: body.config ?? null,
-          active: true,
-          createdAt: now,
-        },
-      },
-      201,
-    )
-  }
-
-  /**
-   * GET /integrations/hooks — list all integration hooks (built-in + tenant-configured)
-   */
-  private handleListIntegrationHooks(): Response {
-    const rows = this.sql.exec('SELECT * FROM integration_hooks ORDER BY created_at DESC').toArray()
-
-    const tenantHooks = rows.map((r) => ({
-      id: r.id as string,
-      entityType: r.entity_type as string,
-      verb: r.verb as string,
-      service: r.service as string,
-      method: r.method as string,
-      config: r.config ? JSON.parse(r.config as string) : null,
-      active: (r.active as number) === 1,
-      createdAt: r.created_at as string,
-      builtin: false,
-    }))
-
-    // Include built-in hooks for reference
-    const builtinList = BUILTIN_HOOKS.map((h: { entityType: string; verb: string; service: string; method: string }) => ({
-      id: `builtin:${h.service}:${h.method}`,
-      entityType: h.entityType,
-      verb: h.verb,
-      service: h.service,
-      method: h.method,
-      config: null,
-      active: true,
-      createdAt: null,
-      builtin: true,
-    }))
-
-    return this.json({ success: true, data: { builtin: builtinList, tenant: tenantHooks } })
-  }
-
-  /**
-   * DELETE /integrations/hooks/:id — remove an integration hook
-   */
-  private handleDeleteIntegrationHook(hookId: string): Response {
-    if (hookId.startsWith('builtin:')) {
-      return this.json({ success: false, error: 'Cannot delete built-in hooks' }, 403)
-    }
-
-    const rows = this.sql.exec('SELECT id FROM integration_hooks WHERE id = ?', hookId).toArray()
-
-    if (rows.length === 0) {
-      return this.json({ success: false, error: 'Integration hook not found' }, 404)
-    }
-
-    this.sql.exec('DELETE FROM integration_hooks WHERE id = ?', hookId)
-
-    return this.json({ success: true })
-  }
-
-  /**
-   * GET /integrations/dispatch-log — query the dispatch audit log
-   *
-   * Query params: eventId, service, status, limit
-   */
-  private handleQueryDispatchLog(params: URLSearchParams): Response {
-    const eventId = params.get('eventId')
-    const service = params.get('service')
-    const status = params.get('status')
-    const limit = Math.min(parseInt(params.get('limit') || '100', 10), 1000)
-
-    let query = 'SELECT * FROM dispatch_log'
-    const conditions: string[] = []
-    const values: (string | number)[] = []
-
-    if (eventId) {
-      conditions.push('event_id = ?')
-      values.push(eventId)
-    }
-    if (service) {
-      conditions.push('service = ?')
-      values.push(service)
-    }
-    if (status) {
-      conditions.push('status = ?')
-      values.push(status)
-    }
-
-    if (conditions.length > 0) {
-      query += ' WHERE ' + conditions.join(' AND ')
-    }
-
-    query += ' ORDER BY timestamp DESC LIMIT ?'
-    values.push(limit)
-
-    const rows = this.sql.exec(query, ...values).toArray()
-
-    const results = rows.map((r) => ({
-      id: r.id as string,
-      eventId: r.event_id as string,
-      hookId: r.hook_id as string,
-      service: r.service as string,
-      method: r.method as string,
-      status: r.status as string,
-      statusCode: r.status_code as number | null,
-      error: r.error as string | null,
-      durationMs: r.duration_ms as number,
-      timestamp: r.timestamp as string,
-    }))
-
-    return this.json({ success: true, data: results })
-  }
-
-  private handleQueryEvents(params: URLSearchParams): Response {
-    const since = params.get('since')
-    const type = params.get('type')
-    const entityId = params.get('entityId')
-    const verb = params.get('verb')
-    const limit = Math.min(parseInt(params.get('limit') || '100', 10), 1000)
-
-    let query = 'SELECT * FROM events'
-    const conditions: string[] = []
-    const values: (string | number)[] = []
-
-    if (since) {
-      conditions.push('timestamp > ?')
-      values.push(since)
-    }
-    if (type) {
-      conditions.push('entity_type = ?')
-      values.push(type)
-    }
-    if (entityId) {
-      conditions.push('entity_id = ?')
-      values.push(entityId)
-    }
-    if (verb) {
-      conditions.push('verb = ?')
-      values.push(verb)
-    }
-
-    if (conditions.length > 0) {
-      query += ' WHERE ' + conditions.join(' AND ')
-    }
-
-    query += ' ORDER BY timestamp DESC LIMIT ?'
-    values.push(limit)
-
-    const rows = this.sql.exec(query, ...values).toArray()
-
-    const events = rows.map((r) => this.rowToFullEvent(r))
-
-    return this.json({ success: true, data: events })
-  }
-
-  /**
-   * GET /events/:id — get a single event by ID
-   */
-  private handleGetEvent(eventId: string): Response {
-    const rows = this.sql.exec('SELECT * FROM events WHERE id = ?', eventId).toArray()
-
-    if (rows.length === 0) {
-      return this.json({ success: false, error: 'Event not found' }, 404)
-    }
-
-    return this.json({ success: true, data: this.rowToFullEvent(rows[0]) })
-  }
-
-  /**
-   * GET /events/history/:type/:id — full event history for an entity
-   */
-  private handleEntityHistory(entityType: string, entityId: string): Response {
-    const rows = this.sql
-      .exec('SELECT * FROM events WHERE entity_type = ? AND entity_id = ? ORDER BY sequence ASC', entityType, entityId)
-      .toArray()
-
-    const events = rows.map((r) => this.rowToFullEvent(r))
-
-    return this.json({ success: true, data: events })
-  }
-
-  /**
-   * GET /events/stream — Server-Sent Events (SSE) stream for CDC
-   *
-   * Query params:
-   *   since  — cursor (event ID to start after)
-   *   types  — comma-separated entity types to filter
-   *   verbs  — comma-separated verbs to filter
-   */
-  private handleEventStream(params: URLSearchParams): Response {
-    const sinceId = params.get('since')
-    const typesParam = params.get('types')
-    const verbsParam = params.get('verbs')
-
-    const types = typesParam ? typesParam.split(',') : null
-    const verbs = verbsParam ? verbsParam.split(',') : null
-
-    const sql = this.sql
-    const encoder = new TextEncoder()
-
-    // Fetch buffered events since cursor
-    let bufferedQuery = 'SELECT * FROM events'
-    const conditions: string[] = []
-    const values: (string | number)[] = []
-
-    if (sinceId) {
-      // Get timestamp of the cursor event for position
-      const cursorRow = sql.exec('SELECT timestamp FROM events WHERE id = ?', sinceId).toArray()[0]
-      if (cursorRow) {
-        conditions.push('(timestamp > ? OR (timestamp = ? AND id > ?))')
-        values.push(cursorRow.timestamp as string, cursorRow.timestamp as string, sinceId)
+      if (sub.mode === 'webhook') {
+        this.dispatchWebhook(sub, event).catch(() => {
+          // Swallow errors — don't break the main flow
+        })
       }
     }
+  }
 
-    if (types) {
-      const placeholders = types.map(() => '?').join(', ')
-      conditions.push(`entity_type IN (${placeholders})`)
-      values.push(...types)
+  private async dispatchWebhook(sub: StoredSubscription, event: FullEvent): Promise<void> {
+    const payload = JSON.stringify(event)
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      'X-Headlessly-Event': event.$type,
+      'X-Headlessly-Delivery': event.$id,
     }
 
-    if (verbs) {
-      const placeholders = verbs.map(() => '?').join(', ')
-      conditions.push(`verb IN (${placeholders})`)
-      values.push(...verbs)
+    if (sub.secret) {
+      const encoder = new TextEncoder()
+      const key = await crypto.subtle.importKey('raw', encoder.encode(sub.secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'])
+      const signature = await crypto.subtle.sign('HMAC', key, encoder.encode(payload))
+      const hex = Array.from(new Uint8Array(signature))
+        .map((b) => b.toString(16).padStart(2, '0'))
+        .join('')
+      headers['X-Headlessly-Signature'] = `sha256=${hex}`
     }
 
-    if (conditions.length > 0) {
-      bufferedQuery += ' WHERE ' + conditions.join(' AND ')
-    }
-
-    bufferedQuery += ' ORDER BY timestamp ASC, id ASC'
-
-    const rowToEvent = this.rowToFullEvent.bind(this)
-
-    const stream = new ReadableStream<Uint8Array>({
-      start(controller) {
-        // 1. Emit all buffered events
-        const rows = sql.exec(bufferedQuery, ...values).toArray()
-        for (const row of rows) {
-          const event = rowToEvent(row)
-          const sseMsg = `id: ${event.$id}\nevent: ${event.$type}\ndata: ${JSON.stringify(event)}\n\n`
-          controller.enqueue(encoder.encode(sseMsg))
-        }
-
-        // 2. Send initial heartbeat (new events will come via subsequent requests)
-        controller.enqueue(encoder.encode(': heartbeat\n\n'))
-
-        // Close stream after emitting buffered events.
-        // (In a real Durable Object with WebSocket hibernation, we'd keep
-        //  the connection open and push new events. Since we're using basic
-        //  HTTP SSE, the client should reconnect with the last event ID.)
-        controller.close()
-      },
-    })
-
-    return new Response(stream, {
-      status: 200,
-      headers: {
-        'Content-Type': 'text/event-stream',
-        'Cache-Control': 'no-cache',
-        Connection: 'keep-alive',
-        'X-Accel-Buffering': 'no',
-      },
+    await fetch(sub.endpoint, {
+      method: 'POST',
+      headers,
+      body: payload,
     })
   }
 
-  // =========================================================================
-  // Time Travel
-  // =========================================================================
+  private matchesPattern(pattern: string, eventType: string): boolean {
+    if (pattern === '*') return true
 
-  /**
-   * GET /entities/:type/:id?asOf=...&atVersion=... — reconstruct state at a point in time
-   */
-  private handleTimeTravelGet(type: string, id: string, params: URLSearchParams): Response {
-    const asOf = params.get('asOf')
-    const atVersionStr = params.get('atVersion')
+    const [patternEntity, patternVerb] = pattern.split('.')
+    const [eventEntity, eventVerb] = eventType.split('.')
 
-    // Fetch event history for this entity
-    let eventsQuery = 'SELECT * FROM events WHERE entity_type = ? AND entity_id = ?'
-    const values: (string | number)[] = [type, id]
+    if (patternEntity === '*') return patternVerb === eventVerb
+    if (patternVerb === '*') return patternEntity === eventEntity
 
-    if (atVersionStr) {
-      const atVersion = parseInt(atVersionStr, 10)
-      if (isNaN(atVersion)) {
-        return this.json({ success: false, error: 'Invalid atVersion parameter' }, 400)
-      }
-      eventsQuery += ' AND sequence <= ?'
-      values.push(atVersion)
-    }
-
-    if (asOf) {
-      eventsQuery += ' AND timestamp <= ?'
-      values.push(asOf)
-    }
-
-    eventsQuery += ' ORDER BY sequence ASC'
-
-    const rows = this.sql.exec(eventsQuery, ...values).toArray()
-
-    if (rows.length === 0) {
-      return this.json({ success: false, error: 'No events found for this entity at the specified point in time' }, 404)
-    }
-
-    // Replay events to reconstruct state
-    const state = this.replayEvents(rows.map((r) => this.rowToFullEvent(r)))
-
-    if (!state) {
-      return this.json({ success: false, error: 'Could not reconstruct state' }, 404)
-    }
-
-    return this.json({ success: true, data: state })
+    return pattern === eventType
   }
 
-  /**
-   * GET /entities/:type/:id/diff?from=1&to=3 — diff between versions
-   */
-  private handleEntityDiff(type: string, id: string, params: URLSearchParams): Response {
-    const fromStr = params.get('from')
-    const toStr = params.get('to')
+  // =========================================================================
+  // Event row helpers
+  // =========================================================================
 
-    if (!fromStr || !toStr) {
-      return this.json({ success: false, error: 'Both from and to parameters are required' }, 400)
-    }
-
-    const fromVersion = parseInt(fromStr, 10)
-    const toVersion = parseInt(toStr, 10)
-
-    if (isNaN(fromVersion) || isNaN(toVersion)) {
-      return this.json({ success: false, error: 'from and to must be valid integers' }, 400)
-    }
-
-    // Fetch all events for this entity up to the 'to' version
-    const allRows = this.sql
-      .exec('SELECT * FROM events WHERE entity_type = ? AND entity_id = ? ORDER BY sequence ASC', type, id)
-      .toArray()
-
-    if (allRows.length === 0) {
-      return this.json({ success: false, error: 'No events found for this entity' }, 404)
-    }
-
-    const allEvents = allRows.map((r) => this.rowToFullEvent(r))
-
-    const fromEvents = allEvents.filter((e) => e.sequence <= fromVersion)
-    const toEvents = allEvents.filter((e) => e.sequence <= toVersion)
-    const betweenEvents = allEvents.filter((e) => e.sequence > fromVersion && e.sequence <= toVersion)
-
-    const beforeState = this.replayEvents(fromEvents)
-    const afterState = this.replayEvents(toEvents)
-
-    // Compute field-level changes
-    const changes = this.computeChanges(beforeState, afterState)
-
-    return this.json({
-      success: true,
-      data: {
-        before: beforeState,
-        after: afterState,
-        events: betweenEvents,
-        changes,
+  private rowToFullEvent(row: Record<string, unknown>): FullEvent {
+    return {
+      $id: row.id as string,
+      $type: row.type as string,
+      entityType: row.entity_type as string,
+      entityId: row.entity_id as string,
+      verb: row.verb as string,
+      conjugation: {
+        action: (row.conjugation_action as string) || (row.verb as string),
+        activity: (row.conjugation_activity as string) || '',
+        event: (row.conjugation_event as string) || '',
       },
-    })
+      data: row.data ? JSON.parse(row.data as string) : null,
+      before: row.before_state ? JSON.parse(row.before_state as string) : null,
+      after: row.after_state ? JSON.parse(row.after_state as string) : null,
+      sequence: (row.sequence as number) ?? 0,
+      timestamp: row.timestamp as string,
+    }
+  }
+
+  private getEntityCount(type: string): number {
+    const row = this.sql.exec('SELECT COUNT(*) as cnt FROM entities WHERE type = ? AND deleted_at IS NULL', type).toArray()[0]
+    return (row?.cnt as number) ?? 0
   }
 
   /**
@@ -1610,402 +1639,5 @@ export class ObjectsDO extends DurableObject<Cloudflare.Env> {
     }
 
     return changes
-  }
-
-  // =========================================================================
-  // Subscriptions
-  // =========================================================================
-
-  /**
-   * POST /subscriptions — register a webhook or websocket subscription
-   */
-  private async handleCreateSubscription(request: Request): Promise<Response> {
-    const body = (await request.json()) as { pattern: string; mode: 'webhook' | 'websocket'; endpoint: string; secret?: string }
-
-    if (!body.pattern || typeof body.pattern !== 'string') {
-      return this.json({ success: false, error: 'Missing or invalid pattern' }, 400)
-    }
-    if (!body.mode || (body.mode !== 'webhook' && body.mode !== 'websocket')) {
-      return this.json({ success: false, error: "mode must be 'webhook' or 'websocket'" }, 400)
-    }
-    if (!body.endpoint || typeof body.endpoint !== 'string') {
-      return this.json({ success: false, error: 'Missing or invalid endpoint' }, 400)
-    }
-
-    const id = generateSubscriptionId()
-    const now = new Date().toISOString()
-
-    this.sql.exec(
-      'INSERT INTO subscriptions (id, pattern, mode, endpoint, secret, active, created_at) VALUES (?, ?, ?, ?, ?, 1, ?)',
-      id,
-      body.pattern,
-      body.mode,
-      body.endpoint,
-      body.secret ?? null,
-      now,
-    )
-
-    return this.json({
-      success: true,
-      data: {
-        id,
-        pattern: body.pattern,
-        mode: body.mode,
-        endpoint: body.endpoint,
-        active: true,
-        createdAt: now,
-      },
-    }, 201)
-  }
-
-  /**
-   * GET /subscriptions — list all subscriptions
-   */
-  private handleListSubscriptions(): Response {
-    const rows = this.sql.exec('SELECT * FROM subscriptions ORDER BY created_at DESC').toArray()
-
-    const subs = rows.map((r) => ({
-      id: r.id as string,
-      pattern: r.pattern as string,
-      mode: r.mode as string,
-      endpoint: r.endpoint as string,
-      active: (r.active as number) === 1,
-      createdAt: r.created_at as string,
-    }))
-
-    return this.json({ success: true, data: subs })
-  }
-
-  /**
-   * DELETE /subscriptions/:id — remove a subscription
-   */
-  private handleDeleteSubscription(subId: string): Response {
-    const rows = this.sql.exec('SELECT id FROM subscriptions WHERE id = ?', subId).toArray()
-
-    if (rows.length === 0) {
-      return this.json({ success: false, error: 'Subscription not found' }, 404)
-    }
-
-    this.sql.exec('DELETE FROM subscriptions WHERE id = ?', subId)
-
-    return this.json({ success: true })
-  }
-
-  /**
-   * Dispatch an event to all matching active subscriptions (fire-and-forget).
-   * For webhook mode, POSTs the event to the endpoint with optional HMAC signing.
-   */
-  private dispatchToSubscriptions(event: FullEvent): void {
-    const rows = this.sql.exec('SELECT * FROM subscriptions WHERE active = 1').toArray()
-
-    for (const row of rows) {
-      const sub: StoredSubscription = {
-        id: row.id as string,
-        pattern: row.pattern as string,
-        mode: row.mode as 'webhook' | 'websocket',
-        endpoint: row.endpoint as string,
-        secret: row.secret as string | null,
-        active: row.active as number,
-        created_at: row.created_at as string,
-      }
-
-      if (!this.matchesPattern(sub.pattern, event.$type)) continue
-
-      if (sub.mode === 'webhook') {
-        // Fire-and-forget webhook dispatch
-        this.dispatchWebhook(sub, event).catch(() => {
-          // Swallow errors — don't break the main flow
-        })
-      }
-      // websocket mode is a placeholder for future DO WebSocket integration
-    }
-  }
-
-  private async dispatchWebhook(sub: StoredSubscription, event: FullEvent): Promise<void> {
-    const payload = JSON.stringify(event)
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-      'X-Headlessly-Event': event.$type,
-      'X-Headlessly-Delivery': event.$id,
-    }
-
-    if (sub.secret) {
-      const encoder = new TextEncoder()
-      const key = await crypto.subtle.importKey('raw', encoder.encode(sub.secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'])
-      const signature = await crypto.subtle.sign('HMAC', key, encoder.encode(payload))
-      const hex = Array.from(new Uint8Array(signature))
-        .map((b) => b.toString(16).padStart(2, '0'))
-        .join('')
-      headers['X-Headlessly-Signature'] = `sha256=${hex}`
-    }
-
-    await fetch(sub.endpoint, {
-      method: 'POST',
-      headers,
-      body: payload,
-    })
-  }
-
-  /**
-   * Match an event type against a glob-style subscription pattern.
-   */
-  private matchesPattern(pattern: string, eventType: string): boolean {
-    if (pattern === '*') return true
-
-    const [patternEntity, patternVerb] = pattern.split('.')
-    const [eventEntity, eventVerb] = eventType.split('.')
-
-    if (patternEntity === '*') return patternVerb === eventVerb
-    if (patternVerb === '*') return patternEntity === eventEntity
-
-    return pattern === eventType
-  }
-
-  // =========================================================================
-  // Event row helpers
-  // =========================================================================
-
-  private rowToFullEvent(row: Record<string, unknown>): FullEvent {
-    return {
-      $id: row.id as string,
-      $type: row.type as string,
-      entityType: row.entity_type as string,
-      entityId: row.entity_id as string,
-      verb: row.verb as string,
-      conjugation: {
-        action: (row.conjugation_action as string) || row.verb as string,
-        activity: (row.conjugation_activity as string) || '',
-        event: (row.conjugation_event as string) || '',
-      },
-      data: row.data ? JSON.parse(row.data as string) : null,
-      before: row.before_state ? JSON.parse(row.before_state as string) : null,
-      after: row.after_state ? JSON.parse(row.after_state as string) : null,
-      sequence: (row.sequence as number) ?? 0,
-      timestamp: row.timestamp as string,
-    }
-  }
-
-  // =========================================================================
-  // Schema
-  // =========================================================================
-
-  private handleFullSchema(): Response {
-    const nouns = this.loadNouns()
-    const schema: Record<string, unknown> = {}
-
-    for (const [name, nounSchema] of nouns) {
-      schema[name] = {
-        ...nounSchema,
-        entityCount: this.getEntityCount(name),
-      }
-    }
-
-    return this.json({ success: true, data: schema })
-  }
-
-  private handleSchemaGraph(): Response {
-    const nouns = this.loadNouns()
-    const nodes: { id: string; label: string; entityCount: number }[] = []
-    const edges: { source: string; target: string; label: string; type: string }[] = []
-
-    for (const [name, nounSchema] of nouns) {
-      nodes.push({
-        id: name,
-        label: name,
-        entityCount: this.getEntityCount(name),
-      })
-
-      for (const [relName, rel] of Object.entries(nounSchema.relationships)) {
-        if (rel.targetType) {
-          edges.push({
-            source: name,
-            target: rel.targetType,
-            label: relName,
-            type: rel.operator ?? '->',
-          })
-        }
-      }
-    }
-
-    return this.json({ success: true, data: { nodes, edges } })
-  }
-
-  private getEntityCount(type: string): number {
-    const row = this.sql.exec('SELECT COUNT(*) as cnt FROM entities WHERE type = ? AND deleted_at IS NULL', type).toArray()[0]
-    return (row?.cnt as number) ?? 0
-  }
-
-  // =========================================================================
-  // Tenant management
-  // =========================================================================
-
-  /**
-   * Provision a new tenant. Stores metadata in the tenant_meta table.
-   * The DO itself is lazily created — this just records that the tenant
-   * was intentionally provisioned (vs. auto-created on first access).
-   */
-  private async handleProvisionTenant(request: Request): Promise<Response> {
-    const body = (await request.json()) as { tenantId: string; name?: string; plan?: string }
-    const tenantId = body.tenantId || request.headers.get('X-Tenant-ID')
-
-    if (!tenantId) {
-      return this.json({ success: false, error: 'Missing tenant ID' }, 400)
-    }
-
-    // Check if already provisioned
-    const existing = this.sql.exec("SELECT value FROM tenant_meta WHERE key = 'status'").toArray()[0]
-    if (existing && (existing.value as string) === 'active') {
-      return this.json({ success: false, error: 'Tenant already provisioned' }, 409)
-    }
-
-    const now = new Date().toISOString()
-    this.sql.exec("INSERT OR REPLACE INTO tenant_meta (key, value) VALUES ('tenantId', ?)", tenantId)
-    this.sql.exec("INSERT OR REPLACE INTO tenant_meta (key, value) VALUES ('status', 'active')")
-    this.sql.exec("INSERT OR REPLACE INTO tenant_meta (key, value) VALUES ('createdAt', ?)", now)
-    if (body.name) {
-      this.sql.exec("INSERT OR REPLACE INTO tenant_meta (key, value) VALUES ('name', ?)", body.name)
-    }
-    if (body.plan) {
-      this.sql.exec("INSERT OR REPLACE INTO tenant_meta (key, value) VALUES ('plan', ?)", body.plan)
-    }
-
-    return this.json({
-      success: true,
-      data: {
-        tenantId,
-        name: body.name ?? tenantId,
-        plan: body.plan ?? 'free',
-        status: 'active',
-        contextUrl: `https://headless.ly/~${tenantId}`,
-        createdAt: now,
-      },
-    }, 201)
-  }
-
-  /**
-   * Get tenant info from the metadata table.
-   */
-  private handleTenantInfo(request: Request): Response {
-    const rows = this.sql.exec('SELECT key, value FROM tenant_meta').toArray()
-
-    if (rows.length === 0) {
-      return this.json({ success: false, error: 'Tenant not found' }, 404)
-    }
-
-    const meta: Record<string, string> = {}
-    for (const row of rows) {
-      meta[row.key as string] = row.value as string
-    }
-
-    return this.json({
-      success: true,
-      data: {
-        tenantId: meta.tenantId ?? request.headers.get('X-Tenant-ID'),
-        name: meta.name ?? meta.tenantId,
-        plan: meta.plan ?? 'free',
-        status: meta.status ?? 'active',
-        contextUrl: `https://headless.ly/~${meta.tenantId ?? request.headers.get('X-Tenant-ID')}`,
-        createdAt: meta.createdAt,
-      },
-    })
-  }
-
-  /**
-   * Get tenant statistics: entity counts by type, total event count, noun count.
-   */
-  private handleTenantStats(request: Request): Response {
-    const tenantId = request.headers.get('X-Tenant-ID')
-
-    // Entity counts by type
-    const entityRows = this.sql.exec('SELECT type, COUNT(*) as cnt FROM entities WHERE deleted_at IS NULL GROUP BY type').toArray()
-    const entityCounts: Record<string, number> = {}
-    let totalEntities = 0
-    for (const row of entityRows) {
-      const count = row.cnt as number
-      entityCounts[row.type as string] = count
-      totalEntities += count
-    }
-
-    // Total events
-    const eventRow = this.sql.exec('SELECT COUNT(*) as cnt FROM events').toArray()[0]
-    const totalEvents = (eventRow?.cnt as number) ?? 0
-
-    // Total nouns
-    const nounRow = this.sql.exec('SELECT COUNT(*) as cnt FROM nouns').toArray()[0]
-    const totalNouns = (nounRow?.cnt as number) ?? 0
-
-    // Total relationships
-    const relRow = this.sql.exec('SELECT COUNT(*) as cnt FROM relationships').toArray()[0]
-    const totalRelationships = (relRow?.cnt as number) ?? 0
-
-    // Total hooks
-    const hookRow = this.sql.exec('SELECT COUNT(*) as cnt FROM hooks').toArray()[0]
-    const totalHooks = (hookRow?.cnt as number) ?? 0
-
-    return this.json({
-      success: true,
-      data: {
-        tenantId,
-        nouns: totalNouns,
-        entities: {
-          total: totalEntities,
-          byType: entityCounts,
-        },
-        events: totalEvents,
-        relationships: totalRelationships,
-        hooks: totalHooks,
-      },
-    })
-  }
-
-  /**
-   * Deactivate a tenant (soft delete). Sets status to 'deactivated'.
-   * Does NOT delete data — data can be reactivated later.
-   */
-  private handleDeactivateTenant(request: Request): Response {
-    const rows = this.sql.exec("SELECT value FROM tenant_meta WHERE key = 'status'").toArray()
-
-    if (rows.length === 0) {
-      return this.json({ success: false, error: 'Tenant not found' }, 404)
-    }
-
-    const currentStatus = rows[0]!.value as string
-    if (currentStatus === 'deactivated') {
-      return this.json({ success: false, error: 'Tenant already deactivated' }, 400)
-    }
-
-    const now = new Date().toISOString()
-    this.sql.exec("INSERT OR REPLACE INTO tenant_meta (key, value) VALUES ('status', 'deactivated')")
-    this.sql.exec("INSERT OR REPLACE INTO tenant_meta (key, value) VALUES ('deactivatedAt', ?)", now)
-
-    return this.json({
-      success: true,
-      data: {
-        tenantId: request.headers.get('X-Tenant-ID'),
-        status: 'deactivated',
-        deactivatedAt: now,
-      },
-    })
-  }
-
-  // =========================================================================
-  // Helpers
-  // =========================================================================
-
-  /**
-   * Build the tenant context URL from request headers.
-   * Falls back to a default URL if no tenant header is present.
-   */
-  private getTenantContextUrl(request: Request): string {
-    const tenantId = request.headers.get('X-Tenant-ID') ?? request.headers.get('X-Tenant') ?? 'default'
-    return `https://headless.ly/~${tenantId}`
-  }
-
-  private json(data: unknown, status = 200, extraHeaders?: Record<string, string>): Response {
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-      ...extraHeaders,
-    }
-    return new Response(JSON.stringify(data), { status, headers })
   }
 }

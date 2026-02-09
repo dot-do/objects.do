@@ -7,7 +7,8 @@
  */
 
 import { Hono } from 'hono'
-import type { AppEnv, ApiResponse, StoredNounSchema } from '../types'
+import type { AppEnv, StoredNounSchema } from '../types'
+import { getStub } from '../lib/tenant'
 
 const app = new Hono<AppEnv>()
 
@@ -15,12 +16,8 @@ const app = new Hono<AppEnv>()
  * GET /schema — full schema
  */
 app.get('/', async (c) => {
-  const tenant = c.get('tenant')
-  const doId = c.env.OBJECTS.idFromName(tenant)
-  const stub = c.env.OBJECTS.get(doId)
-
-  const res = await stub.fetch(new Request('https://do/schema'))
-  const result = (await res.json()) as ApiResponse
+  const stub = getStub(c)
+  const result = await stub.fullSchema()
   return c.json(result)
 })
 
@@ -30,12 +27,8 @@ app.get('/', async (c) => {
  * Returns { nodes: [...], edges: [...] } for rendering with d3, cytoscape, etc.
  */
 app.get('/graph', async (c) => {
-  const tenant = c.get('tenant')
-  const doId = c.env.OBJECTS.idFromName(tenant)
-  const stub = c.env.OBJECTS.get(doId)
-
-  const res = await stub.fetch(new Request('https://do/schema/graph'))
-  const result = (await res.json()) as ApiResponse
+  const stub = getStub(c)
+  const result = await stub.schemaGraph()
   return c.json(result)
 })
 
@@ -45,13 +38,10 @@ app.get('/graph', async (c) => {
  * Generates OpenAPI from currently registered nouns.
  */
 app.get('/openapi', async (c) => {
-  const tenant = c.get('tenant')
-  const doId = c.env.OBJECTS.idFromName(tenant)
-  const stub = c.env.OBJECTS.get(doId)
+  const stub = getStub(c)
 
   // Fetch all nouns to generate the spec
-  const res = await stub.fetch(new Request('https://do/nouns'))
-  const result = (await res.json()) as { success: boolean; data: StoredNounSchema[] }
+  const result = await stub.listNouns()
 
   if (!result.success) {
     return c.json(result)

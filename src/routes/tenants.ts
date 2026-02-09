@@ -9,7 +9,7 @@
 
 import { Hono } from 'hono'
 import type { AppEnv, ApiResponse } from '../types'
-import { getTenantDO } from '../lib/do-router'
+import { getTenantStub } from '../lib/do-router'
 
 const app = new Hono<AppEnv>()
 
@@ -34,26 +34,15 @@ app.post('/', async (c) => {
     return c.json<ApiResponse>({ success: false, error: 'Tenant ID must be 2-64 lowercase alphanumeric characters or hyphens' }, 400)
   }
 
-  const stub = getTenantDO(c.env, body.id)
+  const stub = getTenantStub(c.env, body.id)
 
-  // Send a provision request to the DO
-  const res = await stub.fetch(
-    new Request('https://do/tenant/provision', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Tenant-ID': body.id,
-      },
-      body: JSON.stringify({
-        tenantId: body.id,
-        name: body.name,
-        plan: body.plan,
-      }),
-    }),
-  )
+  const result = await stub.provisionTenant({
+    tenantId: body.id,
+    name: body.name,
+    plan: body.plan,
+  })
 
-  const result = (await res.json()) as ApiResponse
-  return c.json(result, res.status as 200 | 201 | 400 | 409 | 500)
+  return c.json({ success: result.success, data: result.data, error: result.error }, result.status as 200 | 201 | 400 | 409 | 500)
 })
 
 /**
@@ -61,16 +50,10 @@ app.post('/', async (c) => {
  */
 app.get('/:id', async (c) => {
   const id = c.req.param('id')
-  const stub = getTenantDO(c.env, id)
+  const stub = getTenantStub(c.env, id)
 
-  const res = await stub.fetch(
-    new Request('https://do/tenant/info', {
-      headers: { 'X-Tenant-ID': id },
-    }),
-  )
-
-  const result = (await res.json()) as ApiResponse
-  return c.json(result, res.status as 200 | 404)
+  const result = await stub.tenantInfo(id)
+  return c.json({ success: result.success, data: result.data, error: result.error }, result.status as 200 | 404)
 })
 
 /**
@@ -78,16 +61,10 @@ app.get('/:id', async (c) => {
  */
 app.get('/:id/stats', async (c) => {
   const id = c.req.param('id')
-  const stub = getTenantDO(c.env, id)
+  const stub = getTenantStub(c.env, id)
 
-  const res = await stub.fetch(
-    new Request('https://do/tenant/stats', {
-      headers: { 'X-Tenant-ID': id },
-    }),
-  )
-
-  const result = (await res.json()) as ApiResponse
-  return c.json(result, res.status as 200 | 404)
+  const result = await stub.tenantStats(id)
+  return c.json(result)
 })
 
 /**
@@ -95,17 +72,10 @@ app.get('/:id/stats', async (c) => {
  */
 app.delete('/:id', async (c) => {
   const id = c.req.param('id')
-  const stub = getTenantDO(c.env, id)
+  const stub = getTenantStub(c.env, id)
 
-  const res = await stub.fetch(
-    new Request('https://do/tenant/deactivate', {
-      method: 'DELETE',
-      headers: { 'X-Tenant-ID': id },
-    }),
-  )
-
-  const result = (await res.json()) as ApiResponse
-  return c.json(result, res.status as 200 | 404)
+  const result = await stub.deactivateTenant(id)
+  return c.json({ success: result.success, data: result.data, error: result.error }, result.status as 200 | 404)
 })
 
 export default app
