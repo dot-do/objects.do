@@ -3,7 +3,7 @@
  *
  * Architecture:
  * - SQLite stores nouns (schemas), entities (data), events (audit log),
- *   relationships (graph edges), hooks (code-as-data), and subscriptions
+ *   relationships (graph edges via @dotdo/do rels.ts), hooks (code-as-data), and subscriptions
  * - Every verb execution emits a full NounEvent to the immutable event log
  *   with conjugation, before/after state, and monotonic sequence
  * - Events are dispatched to registered subscriptions (webhook/websocket/code)
@@ -29,6 +29,7 @@ import {
   type ServiceBindings,
   type ServiceName,
 } from '../lib/integration-dispatch'
+import { createRels } from '../../../do/core/src/rels'
 import type { StoredNounSchema, NounInstance, VerbEvent, VerbConjugation, Hook } from '../types'
 
 // ---------------------------------------------------------------------------
@@ -128,12 +129,16 @@ function conjugateVerb(verb: string): { action: string; activity: string; event:
 export class ObjectsDO extends DurableObject<Cloudflare.Env> {
   private sql: SqlStorage
 
+  /** Relationship graph edges — delegated to @dotdo/do rels.ts */
+  private rels: ReturnType<typeof createRels>
+
   /** In-memory cache of noun schemas (hydrated from SQLite on first access) */
   private nounCache: Map<string, StoredNounSchema> | null = null
 
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env)
     this.sql = ctx.storage.sql
+    this.rels = createRels(this.sql)
     this.initSchema()
   }
 
@@ -196,17 +201,7 @@ export class ObjectsDO extends DurableObject<Cloudflare.Env> {
     this.sql.exec(`CREATE INDEX IF NOT EXISTS idx_events_verb ON events(verb)`)
     this.sql.exec(`CREATE INDEX IF NOT EXISTS idx_events_sequence ON events(entity_type, entity_id, sequence)`)
 
-    this.sql.exec(`
-      CREATE TABLE IF NOT EXISTS relationships (
-        subject_id TEXT NOT NULL,
-        predicate TEXT NOT NULL,
-        object_id TEXT NOT NULL,
-        created_at TEXT NOT NULL DEFAULT (datetime('now')),
-        PRIMARY KEY (subject_id, predicate, object_id)
-      )
-    `)
-
-    this.sql.exec(`CREATE INDEX IF NOT EXISTS idx_rels_object ON relationships(object_id, predicate)`)
+    // Relationships table is managed by createRels() from @dotdo/do (this.rels)
 
     this.sql.exec(`
       CREATE TABLE IF NOT EXISTS hooks (
@@ -1269,7 +1264,7 @@ export class ObjectsDO extends DurableObject<Cloudflare.Env> {
     const nounRow = this.sql.exec('SELECT COUNT(*) as cnt FROM nouns').toArray()[0]
     const totalNouns = (nounRow?.cnt as number) ?? 0
 
-    const relRow = this.sql.exec('SELECT COUNT(*) as cnt FROM relationships').toArray()[0]
+    const relRow = this.sql.exec('SELECT COUNT(*) as cnt FROM _rels').toArray()[0]
     const totalRelationships = (relRow?.cnt as number) ?? 0
 
     const hookRow = this.sql.exec('SELECT COUNT(*) as cnt FROM hooks').toArray()[0]
