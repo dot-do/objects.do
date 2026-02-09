@@ -1,0 +1,81 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "objects-do",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-01-13",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": {
+    "enabled": true,
+  },
+  "preview_urls": false,
+
+  // Custom domain routing via workers.do zone
+  // objects.do is the primary domain; objects.headless.ly is the headless.ly alias
+  "routes": [
+    {
+      "pattern": "objects.do/*",
+      "zone_name": "workers.do",
+    },
+    {
+      "pattern": "objects.headless.ly/*",
+      "zone_name": "workers.do",
+    },
+  ],
+
+  // R2 bucket for entity snapshots and backups
+  "r2_buckets": [
+    {
+      "binding": "BUCKET",
+      "bucket_name": "objects-do",
+    },
+  ],
+
+  // Durable Objects for per-tenant digital object management
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "OBJECTS",
+        "class_name": "ObjectsDO",
+      },
+    ],
+  },
+
+  // SQLite-backed DO for event log + entity storage
+  // v1+v2 were from a prior deployment with "DigitalObject" class.
+  // v3 renames DigitalObject -> ObjectsDO to match current code export.
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["DigitalObject"],
+    },
+    {
+      "tag": "v2",
+      "deleted_classes": [],
+    },
+    {
+      "tag": "v3",
+      "renamed_classes": [
+        {
+          "from": "DigitalObject",
+          "to": "ObjectsDO",
+        },
+      ],
+    },
+  ],
+
+  // Platform service bindings for integration dispatch
+  // Temporarily disabled — target workers not yet deployed.
+  // Re-enable when worker-stripe, worker-github, integrations, oauth, events are live.
+  // "services": [
+  //   { "binding": "PAYMENTS", "service": "worker-stripe" },
+  //   { "binding": "REPO", "service": "worker-github" },
+  //   { "binding": "INTEGRATIONS", "service": "integrations" },
+  //   { "binding": "OAUTH", "service": "oauth" },
+  //   { "binding": "EVENTS", "service": "events" },
+  // ],
+
+  // Environment variables
+  "vars": {
+    "ENVIRONMENT": "production",
+  },
+}
