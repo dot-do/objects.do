@@ -41,10 +41,12 @@
  *   GET  /health                           - Health check
  */
 
+import { WorkerEntrypoint } from 'cloudflare:workers'
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
 import { logger } from 'hono/logger'
-import type { AppEnv, ApiResponse } from './types'
+import type { AppEnv, ApiResponse, Env, ObjectsStub } from './types'
+import { getTenantStub } from './lib/do-router'
 
 // Route modules
 import nounRoutes from './routes/nouns'
@@ -188,6 +190,89 @@ app.onError((err, c) => {
 app.notFound((c) => {
   return c.json<ApiResponse>({ success: false, error: 'Not found' }, 404)
 })
+
+// =============================================================================
+// Workers RPC Entrypoint — named export for service binding RPC calls
+//
+// Sibling workers call methods on this class via service bindings instead of
+// constructing HTTP requests. Each method takes `tenant` as the first parameter,
+// resolves the tenant's Durable Object stub, and proxies the call.
+// =============================================================================
+
+export class ObjectsService extends WorkerEntrypoint<Env> {
+  private getStub(tenant: string): ObjectsStub {
+    return getTenantStub(this.env, tenant)
+  }
+
+  async defineNoun(tenant: string, body: { name: string; definition: Record<string, string | null> }) {
+    return this.getStub(tenant).defineNoun(body)
+  }
+
+  async listNouns(tenant: string) {
+    return this.getStub(tenant).listNouns()
+  }
+
+  async getNoun(tenant: string, name: string) {
+    return this.getStub(tenant).getNounSchema(name)
+  }
+
+  async createEntity(tenant: string, type: string, data: Record<string, unknown>) {
+    return this.getStub(tenant).createEntity(type, data)
+  }
+
+  async getEntity(tenant: string, type: string, id: string, expand?: string) {
+    return this.getStub(tenant).getEntity(type, id)
+  }
+
+  async findEntities(tenant: string, type: string, options?: { filter?: string; limit?: number; offset?: number; sort?: string }) {
+    return this.getStub(tenant).listEntities(type, options ?? {})
+  }
+
+  async updateEntity(tenant: string, type: string, id: string, data: Record<string, unknown>, ifMatch?: string) {
+    return this.getStub(tenant).updateEntity(type, id, data, ifMatch ? { ifMatch } : undefined)
+  }
+
+  async deleteEntity(tenant: string, type: string, id: string) {
+    return this.getStub(tenant).deleteEntity(type, id)
+  }
+
+  async executeVerb(tenant: string, type: string, id: string, verb: string, data?: Record<string, unknown>) {
+    return this.getStub(tenant).executeVerb(type, id, verb, data)
+  }
+
+  async getEvents(tenant: string, options?: { since?: string; type?: string; entityId?: string; verb?: string; limit?: number }) {
+    return this.getStub(tenant).queryEvents(options ?? {})
+  }
+
+  async getEntityHistory(tenant: string, type: string, id: string) {
+    return this.getStub(tenant).entityHistory(type, id)
+  }
+
+  async createRelationship(
+    tenant: string,
+    sourceType: string,
+    sourceId: string,
+    relationship: { type: string; targetType: string; targetId: string; data?: Record<string, unknown> },
+  ) {
+    return this.getStub(tenant).createRelationship(sourceType, sourceId, relationship)
+  }
+
+  async getRelationships(tenant: string, type: string, id: string, options?: { relType?: string; targetType?: string; direction?: string }) {
+    return this.getStub(tenant).getRelationships(type, id, options as { relType?: string; targetType?: string; direction?: 'outgoing' | 'incoming' | 'both' })
+  }
+
+  async deleteRelationship(tenant: string, relationshipId: string) {
+    return this.getStub(tenant).deleteRelationship(relationshipId)
+  }
+
+  async getSchema(tenant: string) {
+    return this.getStub(tenant).fullSchema()
+  }
+
+  async getOpenAPISpec(tenant: string) {
+    return this.getStub(tenant).openAPISpec()
+  }
+}
 
 // =============================================================================
 // Export — wraps the Hono app to rewrite /~:tenant/ path prefixes

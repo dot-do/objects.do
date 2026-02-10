@@ -184,6 +184,7 @@ export interface NounDefinitionPayload {
 // ---------------------------------------------------------------------------
 
 import type { FullEvent } from './do/objects-do'
+import type { Relationship } from '../../do/core/src/rels'
 
 /**
  * Typed stub interface for ObjectsDO RPC calls.
@@ -232,9 +233,15 @@ export interface ObjectsStub {
   deleteIntegrationHook(hookId: string): Promise<{ success: boolean; error?: string; status: number }>
   queryDispatchLog(params: { eventId?: string; service?: string; status?: string; limit?: number }): Promise<{ success: boolean; data: Record<string, unknown>[] }>
 
+  // Relationships
+  createRelationship(sourceType: string, sourceId: string, relationship: { type: string; targetType: string; targetId: string; data?: Record<string, unknown> }): Promise<{ success: true; data: { id: string; from: string; predicate: string; to: string; createdAt: number } }>
+  getRelationships(type: string, id: string, options?: { relType?: string; targetType?: string; direction?: 'outgoing' | 'incoming' | 'both' }): Promise<{ success: true; data: Relationship[] }>
+  deleteRelationship(relationshipId: string): Promise<{ success: true }>
+
   // Schema
   fullSchema(): Promise<{ success: boolean; data: Record<string, unknown> }>
   schemaGraph(): Promise<{ success: boolean; data: { nodes: Record<string, unknown>[]; edges: Record<string, unknown>[] } }>
+  openAPISpec(): Promise<Record<string, unknown>>
 
   // Tenants
   provisionTenant(body: { tenantId: string; name?: string; plan?: string }): Promise<{ success: boolean; data?: Record<string, unknown>; error?: string; status: number }>

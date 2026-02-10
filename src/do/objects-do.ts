@@ -19,6 +19,7 @@
 
 import { DurableObject } from 'cloudflare:workers'
 import { parseNounDefinition } from '../lib/parse'
+import { toPastParticiple, toGerund } from '../lib/linguistic'
 import {
   BUILTIN_HOOKS,
   dispatchIntegrationHooks,
@@ -32,6 +33,7 @@ import {
 import { createRels } from '../../../do/core/src/rels'
 import { EventEmitter } from '../../../events/core/src/emitter'
 import type { StoredNounSchema, NounInstance, VerbEvent, VerbConjugation, Hook } from '../types'
+import type { Relationship } from '../../../do/core/src/rels'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -93,34 +95,15 @@ function generateSubscriptionId(): string {
 
 /**
  * Derive verb conjugation forms from a verb string.
- * For CRUD verbs we use known forms; for custom verbs we apply simple rules.
+ * Delegates to lib/linguistic.ts (canonical copy from digital-objects) for
+ * correct handling of consonant doubling, vowel-y, and irregular verbs.
  */
 function conjugateVerb(verb: string): { action: string; activity: string; event: string } {
-  const known: Record<string, { action: string; activity: string; event: string }> = {
-    create: { action: 'create', activity: 'creating', event: 'created' },
-    update: { action: 'update', activity: 'updating', event: 'updated' },
-    delete: { action: 'delete', activity: 'deleting', event: 'deleted' },
+  return {
+    action: verb,
+    activity: toGerund(verb),
+    event: toPastParticiple(verb),
   }
-
-  if (known[verb]) return known[verb]
-
-  // Simple conjugation for custom verbs
-  const action = verb
-  let activity: string
-  let event: string
-
-  if (verb.endsWith('e')) {
-    activity = verb.slice(0, -1) + 'ing'
-    event = verb + 'd'
-  } else if (verb.endsWith('y')) {
-    activity = verb + 'ing'
-    event = verb.slice(0, -1) + 'ied'
-  } else {
-    activity = verb + 'ing'
-    event = verb + 'ed'
-  }
-
-  return { action, activity, event }
 }
 
 // ---------------------------------------------------------------------------
@@ -1189,6 +1172,177 @@ export class ObjectsDO extends DurableObject<Cloudflare.Env> {
     }
 
     return { success: true, data: { nodes, edges } }
+  }
+
+  // ---- Relationships ----
+
+  createRelationship(
+    sourceType: string,
+    sourceId: string,
+    relationship: { type: string; targetType: string; targetId: string; data?: Record<string, unknown> },
+  ): { success: true; data: { id: string; from: string; predicate: string; to: string; createdAt: number } } {
+    const from = `${sourceType}_${sourceId}`
+    const to = `${relationship.targetType}_${relationship.targetId}`
+    const rel = this.rels.add(from, relationship.type, to)
+    return { success: true, data: { id: rel.id, from: rel.from, predicate: rel.predicate, to: rel.to, createdAt: rel.createdAt } }
+  }
+
+  getRelationships(
+    type: string,
+    id: string,
+    options?: { relType?: string; targetType?: string; direction?: 'outgoing' | 'incoming' | 'both' },
+  ): { success: true; data: Relationship[] } {
+    const entityKey = `${type}_${id}`
+    const direction = options?.direction ?? 'both'
+
+    let outgoing: Relationship[] = []
+    let incoming: Relationship[] = []
+
+    if (direction === 'outgoing' || direction === 'both') {
+      outgoing = this.rels.relationships(entityKey, options?.relType)
+      if (options?.targetType) {
+        outgoing = outgoing.filter((r) => r.to.startsWith(`${options.targetType}_`))
+      }
+    }
+
+    if (direction === 'incoming' || direction === 'both') {
+      incoming = this.rels.references(entityKey, options?.relType)
+      if (options?.targetType) {
+        incoming = incoming.filter((r) => r.from.startsWith(`${options.targetType}_`))
+      }
+    }
+
+    const data = direction === 'outgoing' ? outgoing : direction === 'incoming' ? incoming : [...outgoing, ...incoming]
+    return { success: true, data }
+  }
+
+  deleteRelationship(relationshipId: string): { success: true } {
+    this.rels.delete(relationshipId)
+    return { success: true }
+  }
+
+  // ---- OpenAPI ----
+
+  openAPISpec(): Record<string, unknown> {
+    const result = this.listNouns()
+    const nouns = result.data
+
+    const paths: Record<string, unknown> = {}
+    const schemas: Record<string, unknown> = {}
+
+    for (const noun of nouns) {
+      const typeLower = noun.slug
+      const typeName = noun.name
+
+      // Generate JSON Schema for the noun
+      const properties: Record<string, unknown> = {
+        $id: { type: 'string', description: `Unique ID (format: ${typeLower}_{sqid})` },
+        $type: { type: 'string', const: typeName },
+        $context: { type: 'string' },
+        $version: { type: 'integer' },
+        $createdAt: { type: 'string', format: 'date-time' },
+        $updatedAt: { type: 'string', format: 'date-time' },
+      }
+
+      for (const [fieldName, field] of Object.entries(noun.fields)) {
+        if (field.kind === 'enum' && field.enumValues) {
+          properties[fieldName] = { type: 'string', enum: field.enumValues }
+        } else if (field.kind === 'field') {
+          const typeMap: Record<string, string> = {
+            string: 'string',
+            number: 'number',
+            int: 'integer',
+            float: 'number',
+            boolean: 'boolean',
+            date: 'string',
+            datetime: 'string',
+            json: 'object',
+            url: 'string',
+            email: 'string',
+            text: 'string',
+            markdown: 'string',
+          }
+          properties[fieldName] = { type: typeMap[field.type ?? 'string'] ?? 'string' }
+        }
+      }
+
+      schemas[typeName] = {
+        type: 'object',
+        properties,
+        required: ['$id', '$type'],
+      }
+
+      // CRUD paths
+      paths[`/entities/${typeName}`] = {
+        get: {
+          summary: `List ${noun.plural}`,
+          tags: [typeName],
+          parameters: [
+            { name: 'filter', in: 'query', schema: { type: 'string' }, description: 'JSON filter object' },
+            { name: 'limit', in: 'query', schema: { type: 'integer', default: 100 } },
+            { name: 'offset', in: 'query', schema: { type: 'integer', default: 0 } },
+            { name: 'sort', in: 'query', schema: { type: 'string' }, description: 'JSON sort object' },
+          ],
+          responses: { '200': { description: `List of ${noun.plural}` } },
+        },
+        post: {
+          summary: `Create a ${noun.singular}`,
+          tags: [typeName],
+          requestBody: { content: { 'application/json': { schema: { $ref: `#/components/schemas/${typeName}` } } } },
+          responses: { '201': { description: `${typeName} created` } },
+        },
+      }
+
+      paths[`/entities/${typeName}/{id}`] = {
+        get: {
+          summary: `Get a ${noun.singular} by ID`,
+          tags: [typeName],
+          parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+          responses: { '200': { description: `The ${noun.singular}` }, '404': { description: 'Not found' } },
+        },
+        put: {
+          summary: `Update a ${noun.singular}`,
+          tags: [typeName],
+          parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+          requestBody: { content: { 'application/json': { schema: { type: 'object' } } } },
+          responses: { '200': { description: `${typeName} updated` } },
+        },
+        delete: {
+          summary: `Delete a ${noun.singular}`,
+          tags: [typeName],
+          parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+          responses: { '200': { description: `${typeName} deleted` } },
+        },
+      }
+
+      // Verb-specific paths
+      for (const [verbName, conj] of Object.entries(noun.verbs)) {
+        if (['create', 'update', 'delete'].includes(verbName)) continue
+
+        paths[`/entities/${typeName}/{id}/${verbName}`] = {
+          post: {
+            summary: `${conj.action} a ${noun.singular} (${conj.activity} -> ${conj.event})`,
+            tags: [typeName],
+            description: `Execute the '${verbName}' verb. Emits ${typeName}.${conj.event} event.`,
+            parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+            requestBody: { content: { 'application/json': { schema: { type: 'object' } } }, required: false },
+            responses: { '200': { description: `${typeName} ${conj.event}` } },
+          },
+        }
+      }
+    }
+
+    return {
+      openapi: '3.1.0',
+      info: {
+        title: 'objects.do API',
+        version: '0.0.1',
+        description: 'Managed Digital Objects with verb conjugation — the runtime for Noun() entities',
+      },
+      servers: [{ url: 'https://objects.do' }],
+      paths,
+      components: { schemas },
+    }
   }
 
   // ---- Tenant Management ----
