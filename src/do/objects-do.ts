@@ -462,43 +462,62 @@ export class ObjectsDO extends DurableObject<Cloudflare.Env> {
     const limit = Math.min(params.limit ?? 100, 1000)
     const offset = params.offset ?? 0
 
-    const rows = this.sql
-      .exec('SELECT data FROM entities WHERE type = ? AND deleted_at IS NULL ORDER BY created_at DESC LIMIT ? OFFSET ?', type, limit, offset)
-      .toArray()
-
-    let entities = rows.map((r) => JSON.parse(r.data as string) as NounInstance)
+    // Build filter conditions to push into SQL WHERE clause
+    const filterConditions: string[] = []
+    const filterValues: (string | number | boolean | null)[] = []
 
     if (params.filter) {
       try {
         const filter = JSON.parse(params.filter) as Record<string, unknown>
-        entities = entities.filter((e) => {
-          for (const [key, value] of Object.entries(filter)) {
-            if (e[key] !== value) return false
+        for (const [key, value] of Object.entries(filter)) {
+          if (value === null) {
+            filterConditions.push(`json_extract(data, '$.' || ?) IS NULL`)
+            filterValues.push(key)
+          } else if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+            filterConditions.push(`json_extract(data, '$.' || ?) = ?`)
+            filterValues.push(key, value as string | number | boolean)
           }
-          return true
-        })
+        }
       } catch {
         return { success: false, error: 'Invalid filter JSON', status: 400 }
       }
     }
 
+    const whereClause = 'WHERE type = ? AND deleted_at IS NULL' + (filterConditions.length > 0 ? ' AND ' + filterConditions.join(' AND ') : '')
+    const whereValues: (string | number | boolean | null)[] = [type, ...filterValues]
+
+    // Build ORDER BY — push sort into SQL via json_extract
+    let orderBy = 'ORDER BY created_at DESC'
+    const sortValues: (string | number | boolean | null)[] = []
     if (params.sort) {
       try {
         const sort = JSON.parse(params.sort) as Record<string, 1 | -1>
-        const [field, dir] = Object.entries(sort)[0] ?? ['$createdAt', -1]
-        entities.sort((a, b) => {
-          const av = a[field!] as string | number
-          const bv = b[field!] as string | number
-          if (av < bv) return dir === 1 ? -1 : 1
-          if (av > bv) return dir === 1 ? 1 : -1
-          return 0
-        })
+        const entry = Object.entries(sort)[0]
+        if (entry) {
+          const [field, dir] = entry
+          const direction = dir === 1 ? 'ASC' : 'DESC'
+          if (field === '$createdAt' || field === 'created_at') {
+            orderBy = `ORDER BY created_at ${direction}`
+          } else if (field === '$updatedAt' || field === 'updated_at') {
+            orderBy = `ORDER BY updated_at ${direction}`
+          } else {
+            orderBy = `ORDER BY json_extract(data, '$.' || ?) ${direction}`
+            sortValues.push(field)
+          }
+        }
       } catch {
-        // Ignore invalid sort
+        // Ignore invalid sort — fall back to default
       }
     }
 
-    const countRow = this.sql.exec('SELECT COUNT(*) as cnt FROM entities WHERE type = ? AND deleted_at IS NULL', type).toArray()[0]
+    const query = `SELECT data FROM entities ${whereClause} ${orderBy} LIMIT ? OFFSET ?`
+    const queryValues = [...whereValues, ...sortValues, limit, offset]
+
+    const rows = this.sql.exec(query, ...queryValues).toArray()
+    const entities = rows.map((r) => JSON.parse(r.data as string) as NounInstance)
+
+    const countQuery = `SELECT COUNT(*) as cnt FROM entities ${whereClause}`
+    const countRow = this.sql.exec(countQuery, ...whereValues).toArray()[0]
     const total = (countRow?.cnt as number) ?? 0
 
     return {
