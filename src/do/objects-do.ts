@@ -18,6 +18,7 @@
  */
 
 import { DurableObject } from 'cloudflare:workers'
+import { DB, R2Backend } from '@dotdo/db'
 import { parseNounDefinition } from '../lib/parse'
 import { toPastParticiple, toGerund } from '../lib/linguistic'
 import {
@@ -113,6 +114,9 @@ function conjugateVerb(verb: string): { action: string; activity: string; event:
 export class ObjectsDO extends DurableObject<Cloudflare.Env> {
   private sql: SqlStorage
 
+  /** @dotdo/db instance for entity storage (R2-backed Parquet/Iceberg) */
+  private db: ReturnType<typeof DB> | null = null
+
   /** Relationship graph edges — delegated to @dotdo/do rels.ts */
   private rels: ReturnType<typeof createRels>
 
@@ -134,6 +138,30 @@ export class ObjectsDO extends DurableObject<Cloudflare.Env> {
       trackPrevious: true,
     })
     this.initSchema()
+    this.initDB()
+  }
+
+  // =========================================================================
+  // @dotdo/db initialization (R2-backed entity storage)
+  // =========================================================================
+
+  private initDB(): void {
+    const envAny = this.env as Record<string, unknown>
+    const bucket = envAny.BUCKET as ConstructorParameters<typeof R2Backend>[0] | undefined
+    if (!bucket) return
+
+    // Scope R2 prefix by tenant ID (stored in tenant_meta), fall back to DO ID
+    const tenantRow = this.sql.exec("SELECT value FROM tenant_meta WHERE key = 'tenantId'").toArray()[0]
+    const prefix = tenantRow ? `${tenantRow.value as string}/` : `${this.ctx.id.toString()}/`
+
+    const storage = new R2Backend(bucket, { prefix })
+    this.db = DB({ schema: 'flexible' }, { storage })
+  }
+
+  /** Get a @dotdo/db collection for a given entity type */
+  private getCollection(type: string): Record<string, (...args: unknown[]) => unknown> {
+    if (!this.db) throw new Error('Database not initialized — missing BUCKET binding')
+    return (this.db as unknown as Record<string, Record<string, (...args: unknown[]) => unknown>>)[type]
   }
 
   // =========================================================================
@@ -401,11 +429,11 @@ export class ObjectsDO extends DurableObject<Cloudflare.Env> {
 
   // ---- Entities ----
 
-  createEntity(
+  async createEntity(
     type: string,
     data: Record<string, unknown>,
     opts?: { tenantId?: string; contextUrl?: string },
-  ): { success: boolean; data?: NounInstance; error?: string; meta?: { eventId: string }; status: number } {
+  ): Promise<{ success: boolean; data?: NounInstance; error?: string; meta?: { eventId: string }; status: number }> {
     const noun = this.getNoun(type)
     if (!noun) {
       return { success: false, error: `Noun '${type}' is not defined. Define it first via POST /nouns`, status: 400 }
@@ -429,6 +457,18 @@ export class ObjectsDO extends DurableObject<Cloudflare.Env> {
       $updatedAt: now,
     }
 
+    // Primary: write to @dotdo/db (R2 Parquet)
+    if (this.db) {
+      try {
+        const collection = this.getCollection(type)
+        await collection.create(entity)
+      } catch (err) {
+        console.warn(`[ObjectsDO] R2 write failed for ${type}/${id}, falling back to SQLite:`, err)
+        // Fall through to SQLite
+      }
+    }
+
+    // Secondary: write to SQLite (kept during migration for safety)
     this.sql.exec(
       'INSERT INTO entities (id, type, data, version, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)',
       id,
@@ -444,7 +484,21 @@ export class ObjectsDO extends DurableObject<Cloudflare.Env> {
     return { success: true, data: entity, meta: { eventId: event.$id }, status: 201 }
   }
 
-  getEntity(type: string, id: string): { success: boolean; data?: NounInstance; error?: string; etag?: string; status: number } {
+  async getEntity(type: string, id: string): Promise<{ success: boolean; data?: NounInstance; error?: string; etag?: string; status: number }> {
+    // Primary: try @dotdo/db (R2 Parquet)
+    if (this.db) {
+      try {
+        const collection = this.getCollection(type)
+        const result = await collection.findOne({ $id: id }) as NounInstance | null
+        if (result && !(result as Record<string, unknown>).$deletedAt) {
+          return { success: true, data: result, etag: `"${result.$version}"`, status: 200 }
+        }
+      } catch {
+        // R2 read failed — fall through to SQLite
+      }
+    }
+
+    // Fallback: SQLite
     const row = this.sql.exec('SELECT data FROM entities WHERE id = ? AND type = ? AND deleted_at IS NULL', id, type).toArray()[0]
 
     if (!row) {
@@ -452,17 +506,58 @@ export class ObjectsDO extends DurableObject<Cloudflare.Env> {
     }
 
     const entity = JSON.parse(row.data as string) as NounInstance
+
+    // Write-through to R2 on fallback hit (migration helper)
+    if (this.db) {
+      try {
+        const collection = this.getCollection(type)
+        await collection.create(entity)
+      } catch {
+        // Best-effort write-through
+      }
+    }
+
     return { success: true, data: entity, etag: `"${entity.$version}"`, status: 200 }
   }
 
-  listEntities(
+  async listEntities(
     type: string,
     params: { limit?: number; offset?: number; filter?: string; sort?: string },
-  ): { success: boolean; data?: NounInstance[]; error?: string; meta?: { total: number; limit: number; offset: number; hasMore: boolean }; status: number } {
+  ): Promise<{ success: boolean; data?: NounInstance[]; error?: string; meta?: { total: number; limit: number; offset: number; hasMore: boolean }; status: number }> {
     const limit = Math.min(params.limit ?? 100, 1000)
     const offset = params.offset ?? 0
 
-    // Build filter conditions to push into SQL WHERE clause
+    // Primary: try @dotdo/db (R2 Parquet)
+    if (this.db) {
+      try {
+        const collection = this.getCollection(type)
+
+        // Parse filter JSON
+        let filterObj: Record<string, unknown> = {}
+        if (params.filter) {
+          try {
+            filterObj = JSON.parse(params.filter) as Record<string, unknown>
+          } catch {
+            return { success: false, error: 'Invalid filter JSON', status: 400 }
+          }
+        }
+
+        const findResult = await collection.find(filterObj, { limit, offset }) as { items: NounInstance[]; total?: number; hasMore: boolean }
+        const entities = (findResult.items ?? []).filter((e: NounInstance) => !(e as Record<string, unknown>).$deletedAt)
+        const total = findResult.total ?? entities.length
+
+        return {
+          success: true,
+          data: entities,
+          meta: { total, limit, offset, hasMore: findResult.hasMore },
+          status: 200,
+        }
+      } catch {
+        // R2 query failed — fall through to SQLite
+      }
+    }
+
+    // Fallback: SQLite
     const filterConditions: string[] = []
     const filterValues: (string | number | boolean | null)[] = []
 
@@ -486,7 +581,6 @@ export class ObjectsDO extends DurableObject<Cloudflare.Env> {
     const whereClause = 'WHERE type = ? AND deleted_at IS NULL' + (filterConditions.length > 0 ? ' AND ' + filterConditions.join(' AND ') : '')
     const whereValues: (string | number | boolean | null)[] = [type, ...filterValues]
 
-    // Build ORDER BY — push sort into SQL via json_extract
     let orderBy = 'ORDER BY created_at DESC'
     const sortValues: (string | number | boolean | null)[] = []
     if (params.sort) {
@@ -528,12 +622,12 @@ export class ObjectsDO extends DurableObject<Cloudflare.Env> {
     }
   }
 
-  updateEntity(
+  async updateEntity(
     type: string,
     id: string,
     updates: Record<string, unknown>,
     opts?: { ifMatch?: string },
-  ): { success: boolean; data?: NounInstance; error?: string; meta?: { eventId?: string; currentVersion?: number; expectedVersion?: number }; etag?: string; status: number } {
+  ): Promise<{ success: boolean; data?: NounInstance; error?: string; meta?: { eventId?: string; currentVersion?: number; expectedVersion?: number }; etag?: string; status: number }> {
     const noun = this.getNoun(type)
     if (noun && noun.disabledVerbs.includes('update')) {
       return { success: false, error: `Verb 'update' is disabled on ${type}`, status: 403 }
@@ -581,6 +675,17 @@ export class ObjectsDO extends DurableObject<Cloudflare.Env> {
       $updatedAt: now,
     }
 
+    // Primary: write to @dotdo/db (R2 Parquet)
+    if (this.db) {
+      try {
+        const collection = this.getCollection(type)
+        await collection.update(id, updated)
+      } catch (err) {
+        console.warn(`[ObjectsDO] R2 update failed for ${type}/${id}, falling back to SQLite:`, err)
+      }
+    }
+
+    // Secondary: SQLite (kept during migration)
     this.sql.exec('UPDATE entities SET data = ?, version = ?, updated_at = ? WHERE id = ?', JSON.stringify(updated), nextVersion, now, id)
 
     const event = this.logEvent(type, id, 'update', updated, existing, updated, existing.$context)
@@ -588,7 +693,7 @@ export class ObjectsDO extends DurableObject<Cloudflare.Env> {
     return { success: true, data: updated, meta: { eventId: event.$id }, etag: `"${nextVersion}"`, status: 200 }
   }
 
-  deleteEntity(type: string, id: string): { success: boolean; error?: string; meta?: { eventId: string }; status: number } {
+  async deleteEntity(type: string, id: string): Promise<{ success: boolean; error?: string; meta?: { eventId: string }; status: number }> {
     const noun = this.getNoun(type)
     if (noun && noun.disabledVerbs.includes('delete')) {
       return { success: false, error: `Verb 'delete' is disabled on ${type}`, status: 403 }
@@ -603,6 +708,17 @@ export class ObjectsDO extends DurableObject<Cloudflare.Env> {
     const existing = JSON.parse(row.data as string) as NounInstance
     const now = new Date().toISOString()
 
+    // Primary: soft-delete in @dotdo/db (R2 Parquet)
+    if (this.db) {
+      try {
+        const collection = this.getCollection(type)
+        await collection.update(id, { ...existing, $deletedAt: now })
+      } catch (err) {
+        console.warn(`[ObjectsDO] R2 soft-delete failed for ${type}/${id}:`, err)
+      }
+    }
+
+    // Secondary: SQLite soft-delete (kept during migration)
     this.sql.exec('UPDATE entities SET deleted_at = ?, updated_at = ? WHERE id = ?', now, now, id)
 
     const event = this.logEvent(type, id, 'delete', null, existing, null, existing.$context)
@@ -610,12 +726,12 @@ export class ObjectsDO extends DurableObject<Cloudflare.Env> {
     return { success: true, meta: { eventId: event.$id }, status: 200 }
   }
 
-  executeVerb(
+  async executeVerb(
     type: string,
     id: string,
     verb: string,
     verbData?: Record<string, unknown>,
-  ): { success: boolean; data?: NounInstance; error?: string; meta?: { event: FullEvent }; status: number } {
+  ): Promise<{ success: boolean; data?: NounInstance; error?: string; meta?: { event: FullEvent }; status: number }> {
     const noun = this.getNoun(type)
     if (!noun) {
       return { success: false, error: `Noun '${type}' is not defined`, status: 400 }
@@ -662,6 +778,17 @@ export class ObjectsDO extends DurableObject<Cloudflare.Env> {
       $updatedAt: now,
     }
 
+    // Primary: write to @dotdo/db (R2 Parquet)
+    if (this.db) {
+      try {
+        const collection = this.getCollection(type)
+        await collection.update(id, updated)
+      } catch (err) {
+        console.warn(`[ObjectsDO] R2 verb update failed for ${type}/${id}:`, err)
+      }
+    }
+
+    // Secondary: SQLite (kept during migration)
     this.sql.exec('UPDATE entities SET data = ?, version = ?, updated_at = ? WHERE id = ?', JSON.stringify(updated), nextVersion, now, id)
 
     const event = this.logEvent(type, id, verb, updated, existing, updated, existing.$context)
@@ -1391,6 +1518,9 @@ export class ObjectsDO extends DurableObject<Cloudflare.Env> {
     if (body.plan) {
       this.sql.exec("INSERT OR REPLACE INTO tenant_meta (key, value) VALUES ('plan', ?)", body.plan)
     }
+
+    // Reinitialize @dotdo/db with the new tenant prefix
+    this.initDB()
 
     return {
       success: true,
