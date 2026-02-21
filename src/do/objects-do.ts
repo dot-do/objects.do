@@ -33,6 +33,7 @@ import {
 } from '../lib/integration-dispatch'
 import { createRels } from '../../../do/core/src/rels'
 import { EventEmitter } from '../../../events/core/src/emitter'
+import type { PipelineLike } from '../../../events/core/src/types'
 import type { StoredNounSchema, NounInstance, VerbEvent, VerbConjugation, Hook } from '../types'
 import type { Relationship } from '../../../do/core/src/rels'
 
@@ -123,20 +124,19 @@ export class ObjectsDO extends DurableObject<Cloudflare.Env> {
   /** In-memory cache of noun schemas (hydrated from SQLite on first access) */
   private nounCache: Map<string, StoredNounSchema> | null = null
 
-  /** Batched CDC event emitter — forwards events to events.do with retry and circuit breaker */
+  /** Batched CDC event emitter — sends events via Pipeline with alarm-based retry */
   private emitter: EventEmitter
 
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env)
     this.sql = ctx.storage.sql
     this.rels = createRels(this.sql)
-    this.emitter = new EventEmitter(ctx, env as Record<string, unknown>, {
-      endpoint: 'https://events.workers.do/ingest',
-      batchSize: 100,
-      flushIntervalMs: 1000,
-      cdc: true,
-      trackPrevious: true,
-    })
+    const pipeline = (env as Record<string, unknown>).EVENTS_PIPELINE as PipelineLike | undefined
+    this.emitter = new EventEmitter(
+      pipeline ?? { send: async () => {} },
+      { batchSize: 100, flushIntervalMs: 1000, cdc: true, trackPrevious: true },
+      ctx,
+    )
     this.initSchema()
     this.initDB()
   }
