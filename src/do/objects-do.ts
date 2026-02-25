@@ -1632,7 +1632,11 @@ export class ObjectsDO extends DurableObject<Cloudflare.Env> {
   // =========================================================================
 
   async alarm(): Promise<void> {
-    await this.emitter.handleAlarm()
+    try {
+      await this.emitter.handleAlarm()
+    } catch (err) {
+      console.error('[ObjectsDO] Alarm failed:', err)
+    }
   }
 
   // =========================================================================
